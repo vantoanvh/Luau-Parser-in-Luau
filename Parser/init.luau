@@ -39,13 +39,15 @@ type Options = {
 	captureComments: boolean,
 	storeCstData: boolean,
 	noErrorLimit: boolean,
-
-	parseFragment: {[string]: any}
+	parseFragment: {
+		resumePosition: Position?,
+		localMap: {[string]: any},
+		localStack: {any}
+	}?
 }
 
 type Parser = {
 	options: Options,
-
 	lexer: Lexer.Lexer,
 
 	recursionCounter: number,
@@ -55,12 +57,10 @@ type Parser = {
 		location: Location
 	},
 
-	localMap: {any},
+	localMap: {[string]: any},
 	localStack: {any},
 
-	cstNodeMap: {
-		[any]: {any}
-	},
+	cstNodeMap: { [any]: any },
 
 	functionStack: {any},
 
@@ -69,12 +69,12 @@ type Parser = {
 	skipComments: boolean,
 	readNames: boolean,
 
-	hotcomments: {any},
-	commentLocations: {any},
+	hotcomments: { { header: boolean, location: Location, content: string? } },
+	commentLocations: { {type: number, location: Location} },
 	parseErrors: {any},
 
 	hotcommentHeader: boolean,
-	typeFunctionDepth: any?,
+	typeFunctionDepth: number?,
 }
 
 export type TypePack = {
@@ -5007,5 +5007,10 @@ return {
 			cstNodeMap = parser.cstNodeMap,
 			errors = errors,
 		}
-	end
+	end,
+	
+	QuoteStyle = QuoteStyle,
+	BraceType = BraceType,
+	
+	Types = Types,
 }
