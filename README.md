@@ -1,23 +1,35 @@
 # Luau Parser in Luau
-Entire port of [Parser.cpp](https://github.com/luau-lang/luau/blob/master/Ast/src/Parser.cpp) (Luau 0.701 Parser) both AST & CST.
+Entire port of [Parser.cpp](https://github.com/luau-lang/luau/blob/master/Ast/src/Parser.cpp) (Lua*u* **[0.701]** Parser) both AST & CST.
+Currently not built for speed, and not type-checked properly.
+
+Lua*u* Parser only useful when building plugins or creating Lua*u* compilers.
 
 # Public API
 
 ```luau
+-- Parsing source code into: success, result
 Parser.parse(source: string, options: Options): boolean, result
+
+-- Contains Single ' or Double ", get string quotes from "ExprConstantString" nodes
+QuoteStyle: {Single, Double}
 ```
 
-These had some plenty of options
+
+## Every options you can use currently:
 ```luau
 {
 	-- Turns off by default, Luau only enables this syntax feature when it knows it is parsing a Definition File
 	allowDeclarationSyntax: boolean,
+
 	-- Turns off by default, Defines parser will save comments or not
 	captureComments: boolean,
+
 	-- Turns off by default, Defines parser will store CST (result.cstNodeMap) or not
 	storeCstData: boolean,
+
 	-- Turns off by default, Remove luau parser error limit (100) or not
 	noErrorLimit: boolean,
+
 	-- Able to start on a different point of the source
 	parseFragment: {
 		resumePosition: Position?,
@@ -27,7 +39,7 @@ These had some plenty of options
 }
 ```
 
-Also a result format
+## The result that returned by the Parser:
 ```luau
 {
 	-- Contains all AST nodes of the source
@@ -47,4 +59,5 @@ Also a result format
 }
 ```
 
+# Documentations
 There's no AST and CST documentation for now
