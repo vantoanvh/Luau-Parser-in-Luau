@@ -37,6 +37,7 @@ You can also change the FFlags in the the LuauParser code, like the new `classes
 
 This parser is fast because it uses a simple singleton-style procedural design. It just resets its internal variables and runs, avoiding the overhead of more complex architectures.
 
+Testing: jecs.luau and LuauParser source code
 | Parser | Mean | Throughput |
 |---|---:|---:|
 | LuauParser ( AST only ) | 44.311 ms | 4.088 MB/s |
