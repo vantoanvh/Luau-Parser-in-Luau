@@ -13,7 +13,7 @@
   </ul>
 </div>
 
-![Ver](https://img.shields.io/badge/version-v0.728-blue?style=plastic)
+![Ver](https://img.shields.io/badge/version-v0.728.5-blue?style=plastic)
 [![License](https://img.shields.io/badge/license-MIT-97ca00?style=plastic)](https://github.com/vantoanvh/LuauParser/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/documentation-online-red?style=plastic&logo=github)](https://vantoanvh.github.io/LuauParser)
 [![Release](https://img.shields.io/badge/release-latest-darkblue?style=plastic&logo=luau&logoColor=white)](https://github.com/vantoanvh/LuauParser/releases/latest)
@@ -36,6 +36,11 @@ You can also change the FFlags in the the LuauParser code, like the new `classes
 ## Performance
 
 This parser is fast because it uses a simple singleton-style procedural design. It just resets its internal variables and runs, avoiding the overhead of more complex architectures.
+
+| Parser | Mean | Throughput |
+|---|---:|---:|
+| LuauParser ( AST only ) | 44.311 ms | 4.088 MB/s |
+| poke | 43.616 ms | 4.154 MB/s |
 
 ## Code Examples
 ```luau
