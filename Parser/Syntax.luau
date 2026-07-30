@@ -1,9 +1,6 @@
 --!strict
 
-export type Position = {
-	line: number,
-	column: number,
-}
+export type Position = vector
 
 export type Location = {
 	begin: Position,

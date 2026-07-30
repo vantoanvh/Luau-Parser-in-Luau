@@ -22,6 +22,8 @@ const LuauParseErrorLimit = 100
 const Confusables = require"@self/Confusables"
 const Syntax = require"@self/Syntax"
 
+const EmptyArray = table.freeze({})
+
 local hotcommentHeader = true
 
 -- // String types
@@ -70,29 +72,36 @@ const ReversedKeywords = {
 	[311] = "while",
 }
 
-const Keywords = {
-	["and"] = 291,
-	["break"] = 292,
-	["do"] = 293,
-	["else"] = 294,
-	["elseif"] = 295,
-	["end"] = 296,
-	["false"] = 297,
-	["for"] = 298,
-	["function"] = 299,
-	["if"] = 300,
-	["in"] = 301,
-	["local"] = 302,
-	["nil"] = 303,
-	["not"] = 304,
-	["or"] = 305,
-	["repeat"] = 306,
-	["return"] = 307,
-	["then"] = 308,
-	["true"] = 309,
-	["until"] = 310,
-	["while"] = 311,
-}
+const IdentifierCharacters = buffer.create(256)
+buffer.writeu8(IdentifierCharacters, 95, 1)
+for Byte = 65, 90 do
+	buffer.writeu8(IdentifierCharacters, Byte, 1)
+end
+for Byte = 97, 122 do
+	buffer.writeu8(IdentifierCharacters, Byte, 1)
+end
+for Byte = 48, 57 do
+	buffer.writeu8(IdentifierCharacters, Byte, 2)
+end
+
+const SimpleTokens = buffer.create(512)
+buffer.writeu16(SimpleTokens, 40 * 2, 40) -- (
+buffer.writeu16(SimpleTokens, 41 * 2, 41) -- )
+buffer.writeu16(SimpleTokens, 93 * 2, 93) -- ]
+buffer.writeu16(SimpleTokens, 59 * 2, 59) -- ;
+buffer.writeu16(SimpleTokens, 44 * 2, 44) -- ,
+buffer.writeu16(SimpleTokens, 35 * 2, 35) -- #
+buffer.writeu16(SimpleTokens, 63 * 2, 63) -- ?
+buffer.writeu16(SimpleTokens, 38 * 2, 38) -- &
+buffer.writeu16(SimpleTokens, 124 * 2, 124) -- |
+buffer.writeu16(SimpleTokens, 61 * 2, 257) -- ==
+buffer.writeu16(SimpleTokens, 60 * 2, 258) -- <=
+buffer.writeu16(SimpleTokens, 62 * 2, 259) -- >=
+buffer.writeu16(SimpleTokens, 126 * 2, 260) -- ~=
+buffer.writeu16(SimpleTokens, 43 * 2, 270) -- +=
+buffer.writeu16(SimpleTokens, 42 * 2, 272) -- *=
+buffer.writeu16(SimpleTokens, 37 * 2, 275) -- %=
+buffer.writeu16(SimpleTokens, 94 * 2, 276) -- ^=
 
 -- // Lookup for operators
 
@@ -433,7 +442,7 @@ const function fixupQuotedString(data: string): (boolean, string?)
 		end
 	end
 
-	return true, string.sub(buffer.tostring(buf), 1, write)
+	return true, buffer.readstring(buf, 0, write)
 end
 
 const function fixupMultilineString(data: string): string
@@ -648,7 +657,6 @@ const kDebugAttributeEntries = {
 -- // Main
 
 local options = {} :: Syntax.Options
-local source = "" :: string
 
 -- // Settings init
 
@@ -657,8 +665,8 @@ local storeCstData = options.storeCstData
 
 -- // Lexer State & Buffer
 
-local buff_data = buffer.fromstring(source)
-local size = #source
+local buff_data = buffer.create(0)
+local size = 0
 
 -- Current State
 local offset = 0
@@ -666,6 +674,7 @@ local line = 0
 local lineOffset = 0
 
 local braceStack: { number } = {}
+local braceStackSize = 0
 
 -- // Current Token State
 
@@ -739,22 +748,26 @@ local localMap: { [string]: Syntax.AstLocal? } = {}
 const function lex(skip_comments: boolean)
 	local ptr = offset
 	local cur_line = line
+	local cur_line_offset = lineOffset
 
 	const buff = buff_data
 	const sourceSize = size
+	const IdentifierCharactersLookup = IdentifierCharacters
+	const SimpleTokensLookup = SimpleTokens
 
 	while true do
 		if ptr >= sourceSize then
 			-- EOF Logic
 			offset = ptr
 			line = cur_line
+			lineOffset = cur_line_offset
 
 			next_type = 0 -- Eof
 			next_end_line = cur_line
-			next_end_col = ptr - lineOffset
+			next_end_col = ptr - cur_line_offset
 
 			next_start_line = cur_line
-			next_start_col = ptr - lineOffset
+			next_start_col = ptr - cur_line_offset
 			return
 		end
 
@@ -765,12 +778,12 @@ const function lex(skip_comments: boolean)
 		elseif c == 10 then -- \n
 			cur_line += 1
 			ptr += 1
-			lineOffset = ptr
+			cur_line_offset = ptr
 		elseif c == 13 then -- \r
 			if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 				ptr += 2
 				cur_line += 1
-				lineOffset = ptr
+				cur_line_offset = ptr
 			else
 				ptr += 1
 			end
@@ -782,45 +795,112 @@ const function lex(skip_comments: boolean)
 	end
 
 	next_start_line = cur_line
-	next_start_col = ptr - lineOffset
+	next_start_col = ptr - cur_line_offset
 	next_string = nil
 	next_aux = nil
 	next_codepoint = nil
 
 	const ch = buffer.readu8(buff, ptr)
+	const characterType = buffer.readu8(IdentifierCharactersLookup, ch)
 	const start_ptr = ptr
 	ptr += 1 -- Consume current char
 
-	const alphaLookup = Alpha
-	const digitLookup = Digits
-	const keywordLookup = Keywords
-
 	-- Identifiers / Keywords
-	if alphaLookup[ch] or ch == 95 then
+	if characterType == 1 then
 		while ptr < sourceSize do
 			const c = buffer.readu8(buff, ptr)
-			if alphaLookup[c] or digitLookup[c] or c == 95 then
+			if buffer.readu8(IdentifierCharactersLookup, c) ~= 0 then
 				ptr += 1
 			else
 				break
 			end
 		end
 
-		const text = string.sub(source, start_ptr + 1, ptr)
+		const identifierLength = ptr - start_ptr
+		local identifierType = 281
 
-		next_type = keywordLookup[text] or 281 -- Name fallback when `text` is not a keyword
-		next_string = text
+		if identifierLength == 2 then
+			const bytes = buffer.readu16(buff, start_ptr)
+			if bytes == 0x6f64 then -- do
+				identifierType = 293
+			elseif bytes == 0x6669 then -- if
+				identifierType = 300
+			elseif bytes == 0x6e69 then -- in
+				identifierType = 301
+			elseif bytes == 0x726f then -- or
+				identifierType = 305
+			end
+		elseif identifierLength == 3 then
+			const firstBytes = buffer.readu16(buff, start_ptr)
+			const thirdByte = buffer.readu8(buff, start_ptr + 2)
+			if firstBytes == 0x6e61 and thirdByte == 100 then -- and
+				identifierType = 291
+			elseif firstBytes == 0x6e65 and thirdByte == 100 then -- end
+				identifierType = 296
+			elseif firstBytes == 0x6f66 and thirdByte == 114 then -- for
+				identifierType = 298
+			elseif firstBytes == 0x696e and thirdByte == 108 then -- nil
+				identifierType = 303
+			elseif firstBytes == 0x6f6e and thirdByte == 116 then -- not
+				identifierType = 304
+			end
+		elseif identifierLength == 4 then
+			const bytes = buffer.readu32(buff, start_ptr)
+			if bytes == 0x65736c65 then -- else
+				identifierType = 294
+			elseif bytes == 0x6e656874 then -- then
+				identifierType = 308
+			elseif bytes == 0x65757274 then -- true
+				identifierType = 309
+			end
+		elseif identifierLength == 5 then
+			const firstBytes = buffer.readu32(buff, start_ptr)
+			const fifthByte = buffer.readu8(buff, start_ptr + 4)
+			if firstBytes == 0x61657262 and fifthByte == 107 then -- break
+				identifierType = 292
+			elseif firstBytes == 0x736c6166 and fifthByte == 101 then -- false
+				identifierType = 297
+			elseif firstBytes == 0x61636f6c and fifthByte == 108 then -- local
+				identifierType = 302
+			elseif firstBytes == 0x69746e75 and fifthByte == 108 then -- until
+				identifierType = 310
+			elseif firstBytes == 0x6c696877 and fifthByte == 101 then -- while
+				identifierType = 311
+			end
+		elseif identifierLength == 6 then
+			const firstBytes = buffer.readu32(buff, start_ptr)
+			const lastBytes = buffer.readu16(buff, start_ptr + 4)
+			if firstBytes == 0x65736c65 and lastBytes == 0x6669 then -- elseif
+				identifierType = 295
+			elseif firstBytes == 0x65706572 and lastBytes == 0x7461 then -- repeat
+				identifierType = 306
+			elseif firstBytes == 0x75746572 and lastBytes == 0x6e72 then -- return
+				identifierType = 307
+			end
+		elseif
+			identifierLength == 8
+			and buffer.readu32(buff, start_ptr) == 0x636e7566
+			and buffer.readu32(buff, start_ptr + 4) == 0x6e6f6974
+		then -- function
+			identifierType = 299
+		end
+
+		next_type = identifierType
+		if identifierType == 281 then
+			next_string = buffer.readstring(buff, start_ptr, ptr - start_ptr)
+		end
 		-- Numbers (0-9)
-	elseif digitLookup[ch] then
-		while ptr < size do
+	elseif characterType == 2 then
+		while ptr < sourceSize do
 			const numberChar = buffer.readu8(buff, ptr)
+			const numberCharacterType = buffer.readu8(IdentifierCharactersLookup, numberChar)
 
-			if Digits[numberChar] or numberChar == 46 or numberChar == 95 then
+			if numberCharacterType == 2 or numberChar == 46 or numberChar == 95 then
 				ptr += 1
 			elseif numberChar == 101 or numberChar == 69 then -- e / E
 				ptr += 1
 
-				if ptr < size then
+				if ptr < sourceSize then
 					const exp_ch = buffer.readu8(buff, ptr)
 					if exp_ch == 43 or exp_ch == 45 then -- + / -
 						ptr += 1
@@ -831,10 +911,10 @@ const function lex(skip_comments: boolean)
 			end
 		end
 
-		while ptr < size do
+		while ptr < sourceSize do
 			const suffixChar = buffer.readu8(buff, ptr)
 
-			if Alpha[suffixChar] or Digits[suffixChar] or suffixChar == 95 then
+			if buffer.readu8(IdentifierCharactersLookup, suffixChar) ~= 0 then
 				ptr += 1
 			else
 				break
@@ -842,7 +922,7 @@ const function lex(skip_comments: boolean)
 		end
 		
 		next_type = 280 -- Number
-		next_string = string.sub(source, start_ptr + 1, ptr)
+		next_string = buffer.readstring(buff, start_ptr, ptr - start_ptr)
 
 		-- Strings (" or ')
 	elseif ch == 34 or ch == 39 then -- " or '
@@ -859,12 +939,12 @@ const function lex(skip_comments: boolean)
 					const esc = buffer.readu8(buff, ptr)
 					if esc == 10 then -- \n
 						cur_line += 1
-						lineOffset = ptr + 1
+						cur_line_offset = ptr + 1
 					elseif esc == 13 then -- \r
 						if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 							cur_line += 1
 							ptr += 1
-							lineOffset = ptr + 1
+							cur_line_offset = ptr + 1
 						end
 					elseif esc == 122 then -- z
 						ptr += 1
@@ -873,12 +953,12 @@ const function lex(skip_comments: boolean)
 							if wc == 32 or wc == 9 or wc == 10 or wc == 13 or wc == 11 or wc == 12 then
 								if wc == 10 then
 									cur_line += 1
-									lineOffset = ptr + 1
+									cur_line_offset = ptr + 1
 								elseif wc == 13 then
 									if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 										ptr += 1
 										cur_line += 1
-										lineOffset = ptr + 1
+										cur_line_offset = ptr + 1
 									end
 								end
 								ptr += 1
@@ -902,12 +982,20 @@ const function lex(skip_comments: boolean)
 			next_type = 286 -- BrokenString
 		else
 			next_type = 279 -- QuotedString
-			next_string = string.sub(source, content_start + 1, ptr)
+			next_string = buffer.readstring(buff, content_start, ptr - content_start)
 			next_aux = if delim == 39 then 0 else 1
 			ptr += 1 -- consume closing delim
 		end
 
 		-- Operators & Punctuation
+	elseif buffer.readu16(SimpleTokensLookup, ch * 2) ~= 0 then
+		const directToken = buffer.readu16(SimpleTokensLookup, ch * 2)
+		if directToken > 255 and ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
+			ptr += 1
+			next_type = directToken
+		else
+			next_type = ch
+		end
 	elseif ch == 45 then -- '-'
 		const next_ch = if ptr < sourceSize then buffer.readu8(buff, ptr) else 0
 		if next_ch == 62 then -- ->
@@ -953,7 +1041,7 @@ const function lex(skip_comments: boolean)
 							end
 						elseif c == 10 then -- \n
 							cur_line += 1
-							lineOffset = ptr + 1
+							cur_line_offset = ptr + 1
 						end
 						ptr += 1
 					end
@@ -981,8 +1069,15 @@ const function lex(skip_comments: boolean)
 				next_type = 282 -- Comment
 			end
 
-			if not skip_comments then
-				next_string = string.sub(source, comment_start + 1, ptr)
+			if
+				not skip_comments
+				or (
+					next_type == 282
+					and comment_start < ptr
+					and buffer.readu8(buff, comment_start) == 33
+				)
+			then
+				next_string = buffer.readstring(buff, comment_start, ptr - comment_start)
 			end
 		else
 			next_type = 45 -- '-'
@@ -1002,18 +1097,19 @@ const function lex(skip_comments: boolean)
 				next_type = 261 -- Dot2
 			end
 		else
-			if digitLookup[next_ch] then
+			if buffer.readu8(IdentifierCharactersLookup, next_ch) == 2 then
 				ptr -= 1 -- Backtrack
 				const n_start = ptr
-				while ptr < size do
+				while ptr < sourceSize do
 					const numberChar = buffer.readu8(buff, ptr)
+					const numberCharacterType = buffer.readu8(IdentifierCharactersLookup, numberChar)
 
-					if Digits[numberChar] or numberChar == 46 or numberChar == 95 then
+					if numberCharacterType == 2 or numberChar == 46 or numberChar == 95 then
 						ptr += 1
 					elseif numberChar == 101 or numberChar == 69 then -- e / E
 						ptr += 1
 
-						if ptr < size then
+						if ptr < sourceSize then
 							const exp_ch = buffer.readu8(buff, ptr)
 							if exp_ch == 43 or exp_ch == 45 then -- + / -
 								ptr += 1
@@ -1024,10 +1120,10 @@ const function lex(skip_comments: boolean)
 					end
 				end
 
-				while ptr < size do
+				while ptr < sourceSize do
 					const suffixChar = buffer.readu8(buff, ptr)
 
-					if Alpha[suffixChar] or Digits[suffixChar] or suffixChar == 95 then
+					if buffer.readu8(IdentifierCharactersLookup, suffixChar) ~= 0 then
 						ptr += 1
 					else
 						break
@@ -1035,66 +1131,10 @@ const function lex(skip_comments: boolean)
 				end
 				
 				next_type = 280 -- Number
-				next_string = string.sub(source, n_start + 1, ptr)
+				next_string = buffer.readstring(buff, n_start, ptr - n_start)
 			else
 				next_type = 46 -- '.'
 			end
-		end
-	elseif ch == 61 then -- '='
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 257 -- Equal
-		else
-			next_type = 61
-		end
-	elseif ch == 60 then -- '<'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 258 -- LessEqual
-		else
-			next_type = 60
-		end
-	elseif ch == 62 then -- '>'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 259 -- GreaterEqual
-		else
-			next_type = 62
-		end
-	elseif ch == 126 then -- '~'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 260 -- NotEqual
-		else
-			next_type = 126
-		end
-	elseif ch == 43 then -- '+'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 270 -- AddAssign
-		else
-			next_type = 43
-		end
-	elseif ch == 42 then -- '*'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 272 -- MulAssign
-		else
-			next_type = 42
-		end
-	elseif ch == 37 then -- '%'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 275 -- ModAssign
-		else
-			next_type = 37
-		end
-	elseif ch == 94 then -- '^'
-		if ptr < sourceSize and buffer.readu8(buff, ptr) == 61 then
-			ptr += 1
-			next_type = 276 -- PowAssign
-		else
-			next_type = 94
 		end
 	elseif ch == 47 then -- '/'
 		const next_ch = if ptr < sourceSize then buffer.readu8(buff, ptr) else 0
@@ -1122,28 +1162,22 @@ const function lex(skip_comments: boolean)
 
 		-- Single Char / Interp
 	elseif
-		ch == 40
-		or ch == 41
-		or ch == 93
-		or ch == 59
-		or ch == 44
-		or ch == 35
-		or ch == 63
-		or ch == 38
-		or ch == 124
-		or ch == 123
+		ch == 123
 		or ch == 125
 	then
 		if ch == 123 then
-			if #braceStack > 0 then
-				table.insert(braceStack, BraceType.Normal)
+			if braceStackSize > 0 then
+				braceStackSize += 1
+				braceStack[braceStackSize] = BraceType.Normal
 			end
 			next_type = ch
 		elseif ch == 125 then
-			if #braceStack == 0 then
+			if braceStackSize == 0 then
 				next_type = ch
 			else
-				const top = table.remove(braceStack)
+				const top = braceStack[braceStackSize]
+				braceStack[braceStackSize] = nil
+				braceStackSize -= 1
 				if top ~= BraceType.InterpolatedString then
 					next_type = ch
 				else
@@ -1155,7 +1189,7 @@ const function lex(skip_comments: boolean)
 
 						if c == 96 then -- `
 							next_type = 268 -- InterpStringEnd
-							next_string = string.sub(source, sectionStart + 1, ptr)
+							next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 							ptr += 1
 							sectionDone = true
 							break
@@ -1181,7 +1215,7 @@ const function lex(skip_comments: boolean)
 										if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 											cur_line += 1
 											ptr += 1
-											lineOffset = ptr + 1
+											cur_line_offset = ptr + 1
 										end
 									elseif esc == 122 then -- z
 										ptr += 1
@@ -1200,7 +1234,7 @@ const function lex(skip_comments: boolean)
 
 											if wc == 10 then
 												cur_line += 1
-												lineOffset = ptr + 1
+												cur_line_offset = ptr + 1
 											elseif
 												wc == 13
 												and ptr + 1 < sourceSize
@@ -1208,14 +1242,14 @@ const function lex(skip_comments: boolean)
 											then
 												ptr += 1
 												cur_line += 1
-												lineOffset = ptr + 1
+												cur_line_offset = ptr + 1
 											end
 
 											ptr += 1
 										end
 									elseif esc == 10 then -- \n
 										cur_line += 1
-										lineOffset = ptr + 1
+										cur_line_offset = ptr + 1
 										ptr += 1
 									else
 										ptr += 1
@@ -1223,18 +1257,19 @@ const function lex(skip_comments: boolean)
 								end
 							end
 						elseif c == 123 then -- {
-							table.insert(braceStack, BraceType.InterpolatedString)
+							braceStackSize += 1
+							braceStack[braceStackSize] = BraceType.InterpolatedString
 
 							if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 123 then
 								next_type = 289 -- BrokenInterpDoubleBrace
-								next_string = string.sub(source, sectionStart + 1, ptr)
+								next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 								ptr += 2
 								sectionDone = true
 								break
 							end
 
 							next_type = 267 -- InterpStringMid
-							next_string = string.sub(source, sectionStart + 1, ptr)
+							next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 							ptr += 1
 							sectionDone = true
 							break
@@ -1260,7 +1295,7 @@ const function lex(skip_comments: boolean)
 
 			if c == 96 then -- `
 				next_type = 269 -- InterpStringSimple
-				next_string = string.sub(source, sectionStart + 1, ptr)
+				next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 				ptr += 1
 				sectionDone = true
 				break
@@ -1281,7 +1316,7 @@ const function lex(skip_comments: boolean)
 							if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 								cur_line += 1
 								ptr += 1
-								lineOffset = ptr + 1
+								cur_line_offset = ptr + 1
 							end
 						elseif esc == 122 then -- z
 							ptr += 1
@@ -1293,18 +1328,18 @@ const function lex(skip_comments: boolean)
 
 								if wc == 10 then
 									cur_line += 1
-									lineOffset = ptr + 1
+									cur_line_offset = ptr + 1
 								elseif wc == 13 and ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 10 then
 									ptr += 1
 									cur_line += 1
-									lineOffset = ptr + 1
+									cur_line_offset = ptr + 1
 								end
 
 								ptr += 1
 							end
 						elseif esc == 10 then -- \n
 							cur_line += 1
-							lineOffset = ptr + 1
+							cur_line_offset = ptr + 1
 							ptr += 1
 						else
 							ptr += 1
@@ -1312,18 +1347,19 @@ const function lex(skip_comments: boolean)
 					end
 				end
 			elseif c == 123 then -- {
-				table.insert(braceStack, BraceType.InterpolatedString)
+				braceStackSize += 1
+				braceStack[braceStackSize] = BraceType.InterpolatedString
 
 				if ptr + 1 < sourceSize and buffer.readu8(buff, ptr + 1) == 123 then
 					next_type = 289 -- BrokenInterpDoubleBrace
-					next_string = string.sub(source, sectionStart + 1, ptr)
+					next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 					ptr += 2
 					sectionDone = true
 					break
 				end
 
 				next_type = 266 -- InterpStringBegin
-				next_string = string.sub(source, sectionStart + 1, ptr)
+				next_string = buffer.readstring(buff, sectionStart, ptr - sectionStart)
 				ptr += 1
 				sectionDone = true
 				break
@@ -1360,7 +1396,7 @@ const function lex(skip_comments: boolean)
 
 					if cc == count and c2 < sourceSize and buffer.readu8(buff, c2) == 93 then
 						next_type = 278 -- RawString
-						next_string = string.sub(source, ls_start + 1, ptr)
+						next_string = buffer.readstring(buff, ls_start, ptr - ls_start)
 						ptr = c2 + 1
 						next_aux = count
 						found = true
@@ -1368,7 +1404,7 @@ const function lex(skip_comments: boolean)
 					end
 				elseif buffer.readu8(buff, ptr) == 10 then
 					cur_line += 1
-					lineOffset = ptr + 1
+					cur_line_offset = ptr + 1
 				end
 				ptr += 1
 			end
@@ -1388,18 +1424,18 @@ const function lex(skip_comments: boolean)
 			next_type = 284 -- Attribute
 			if ptr < sourceSize then
 				const first = buffer.readu8(buff, ptr)
-				if alphaLookup[first] or first == 95 then
+				if buffer.readu8(IdentifierCharactersLookup, first) == 1 then
 					const name_start = ptr
 					ptr += 1
 					while ptr < sourceSize do
 						const c = buffer.readu8(buff, ptr)
-						if alphaLookup[c] or digitLookup[c] or c == 95 then
+						if buffer.readu8(IdentifierCharactersLookup, c) ~= 0 then
 							ptr += 1
 						else
 							break
 						end
 					end
-					next_string = string.sub(source, name_start + 1, ptr)
+					next_string = buffer.readstring(buff, name_start, ptr - name_start)
 				else
 					next_string = ""
 				end
@@ -1458,27 +1494,34 @@ const function lex(skip_comments: boolean)
 	-- Sync State
 	offset = ptr
 	line = cur_line
+	lineOffset = cur_line_offset
 	next_end_line = cur_line
-	next_end_col = ptr - lineOffset
+	next_end_col = ptr - cur_line_offset
 end
 
 -- // Parser Interface
 const function fillNext()
 	while true do
-		lex(false) -- writes to next_*
+		lex(not captureComments) -- writes to next_*
 
 		if next_type == 282 or next_type == 283 or next_type == 287 then -- Comment / BlockComment / BrokenComment
 			if captureComments then
+				if commentLocations == EmptyArray then
+					commentLocations = {}
+				end
 				table.insert(commentLocations, {
 					type = next_type,
 					location = {
-						begin = { line = next_start_line, column = next_start_col },
-						end_ = { line = next_end_line, column = next_end_col },
+						begin = vector.create(next_start_line, next_start_col),
+						end_ = vector.create(next_end_line, next_end_col),
 					},
 				})
 			end
 
 			if next_type == 282 and next_string and string.byte(next_string :: string, 1) == 33 then -- Comment and '!'
+				if hotcomments == EmptyArray then
+					hotcomments = {}
+				end
 				const text = next_string :: string
 				local ending = #text
 
@@ -1496,8 +1539,8 @@ const function fillNext()
 					{
 						header = hotcommentHeader,
 						location = {
-							begin = { line = next_start_line, column = next_start_col },
-							end_ = { line = next_end_line, column = next_end_col },
+							begin = vector.create(next_start_line, next_start_col),
+							end_ = vector.create(next_end_line, next_end_col),
 						},
 						content = string.sub(text, 2, ending),
 					} :: Syntax.HotComment
@@ -1537,32 +1580,22 @@ end
 
 const function snapshot(): Syntax.Location
 	return {
-		begin = { line = token_start_line, column = token_start_col },
-		end_ = { line = token_end_line, column = token_end_col },
-	}
-end
-
-const function get_lexeme(): Syntax.Lexeme
-	return {
-		type = token_type,
-		location = {
-			begin = { line = token_start_line, column = token_start_col },
-			end_ = { line = token_end_line, column = token_end_col },
-		},
+		begin = vector.create(token_start_line, token_start_col),
+		end_ = vector.create(token_end_line, token_end_col),
 	}
 end
 
 const function getprev(): Syntax.Location
 	return {
-		begin = { line = prev_start_line, column = prev_start_col },
-		end_ = { line = prev_end_line, column = prev_end_col },
+		begin = vector.create(prev_start_line, prev_start_col),
+		end_ = vector.create(prev_end_line, prev_end_col),
 	}
 end
 
 -- // Error reports
 
 const function positionsEqual(a: Syntax.Position, b: Syntax.Position): boolean
-	return a.line == b.line and a.column == b.column
+	return a.x == b.x and a.y == b.y
 end
 
 const function locationsEqual(a: Syntax.Location, b: Syntax.Location): boolean
@@ -1575,6 +1608,9 @@ const function report(loc: Syntax.Location, fmt: string, ...: unknown)
 	end
 
 	const msg = string.format(fmt, ...)
+	if parseErrors == EmptyArray then
+		parseErrors = {}
+	end
 	table.insert(parseErrors, { location = loc, message = msg })
 
 	if LuauParseErrorLimit == 1 then
@@ -1781,7 +1817,7 @@ const function reportMissingTypeError(
 	return {
 		kind = "TypeError",
 		location = astErrorLocation,
-		types = {},
+		types = EmptyArray :: { Syntax.AstType },
 		isMissing = true,
 		messageIndex = #parseErrors,
 	}
@@ -1875,18 +1911,34 @@ type ParserFunctionTable = {
 
 const ParserFunctions = {} :: ParserFunctionTable
 
-const function parseNameOptImpl(context: string?): Syntax.Binding?
+const function parseNameScalars(context: string?): (string?, number, number, number, number)
 	if token_type ~= 281 then
 		reportNameError(context)
+		return nil, token_start_line, token_start_col, token_end_line, token_end_col
+	end
+
+	const name = token_string :: string
+	const startLine, startColumn = token_start_line, token_start_col
+	const endLine, endColumn = token_end_line, token_end_col
+
+	nextLexeme()
+	return name, startLine, startColumn, endLine, endColumn
+end
+
+const function parseNameOptImpl(context: string?): Syntax.Binding?
+	const name, startLine, startColumn, endLine, endColumn = parseNameScalars(context)
+	if not name then
 		return nil
 	end
 
 	const result = {
-		name = { value = token_string :: string },
-		location = snapshot(),
+		name = { value = name },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		},
 	} :: Syntax.Binding
 
-	nextLexeme()
 	return result
 end
 
@@ -1896,7 +1948,7 @@ end
 --      `{' [PropList] `}' |
 --      `(' [TypeList] `)' `->` ReturnType
 --      `typeof` Type
-const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Location): Syntax.AstType
+const function parseTypeSuffixImpl(type_: Syntax.AstType?, beginLine: number, beginColumn: number): Syntax.AstType
 	const parts = {} :: { Syntax.AstType }
 	if type_ then
 		table.insert(parts, type_)
@@ -1908,12 +1960,12 @@ const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Locatio
 	local isIntersection = false
 	local optionalCount = 0
 
-	const separatorPositions: { Syntax.Position } = {}
+	const separatorPositions: { Syntax.Position }? = if storeCstData then {} else nil
 	local leadingPosition: Syntax.Position? = nil
 
 	while true do
 		const t = token_type
-		const separatorPosition = { line = token_start_line, column = token_start_col }
+		const separatorLine, separatorColumn = token_start_line, token_start_col
 
 		if t == 124 then
 			nextLexeme()
@@ -1929,7 +1981,8 @@ const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Locatio
 
 			isUnion = true
 
-			if storeCstData then
+			if separatorPositions then
+				const separatorPosition = vector.create(separatorLine, separatorColumn)
 				if type_ == nil and not leadingPosition then
 					leadingPosition = separatorPosition
 				else
@@ -1958,7 +2011,8 @@ const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Locatio
 
 			isIntersection = true
 
-			if storeCstData then
+			if separatorPositions then
+				const separatorPosition = vector.create(separatorLine, separatorColumn)
 				if type_ == nil and not leadingPosition then
 					leadingPosition = separatorPosition
 				else
@@ -1985,17 +2039,23 @@ const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Locatio
 
 	if isUnion and isIntersection then
 		return reportTypeError(
-			{ begin = begin.begin, end_ = parts[#parts].location.end_ },
+			{
+				begin = vector.create(beginLine, beginColumn),
+				end_ = parts[#parts].location.end_,
+			},
 			parts,
 			"Mixing union and intersection types is not allowed; consider wrapping in parentheses."
 		)
 	end
 
-	const loc = { begin = begin.begin, end_ = parts[#parts].location.end_ }
+	const loc = {
+		begin = vector.create(beginLine, beginColumn),
+		end_ = parts[#parts].location.end_,
+	}
 
 	if isUnion then
 		const node = { kind = "TypeUnion", location = loc, types = parts } :: Syntax.AstTypeUnion
-		if storeCstData then
+		if separatorPositions then
 			node.cstNode = {
 				kind = "CstTypeUnion",
 				leadingPosition = leadingPosition,
@@ -2007,7 +2067,7 @@ const function parseTypeSuffixImpl(type_: Syntax.AstType?, begin: Syntax.Locatio
 
 	if isIntersection then
 		const node = { kind = "TypeIntersection", location = loc, types = parts } :: Syntax.AstTypeIntersection
-		if storeCstData then
+		if separatorPositions then
 			node.cstNode = {
 				kind = "CstTypeIntersection",
 				leadingPosition = leadingPosition,
@@ -2024,7 +2084,7 @@ const function parseTypeImpl(inDeclarationContext: boolean?): Syntax.AstType
 	const oldRec = recursionCounter
 	-- recursion counter is incremented in parseSimpleType and/or parseTypeSuffix
 
-	const begin = snapshot()
+	const beginLine, beginColumn = token_start_line, token_start_col
 
 	local type_: Syntax.AstType? = nil
 
@@ -2033,7 +2093,7 @@ const function parseTypeImpl(inDeclarationContext: boolean?): Syntax.AstType
 		recursionCounter = oldRec
 	end
 
-	const typeWithSuffix = parseTypeSuffixImpl(type_, begin)
+	const typeWithSuffix = parseTypeSuffixImpl(type_, beginLine, beginColumn)
 	recursionCounter = oldRec
 
 	return typeWithSuffix
@@ -2048,45 +2108,30 @@ const function parseOptionalTypeImpl(): Syntax.AstType?
 	end
 end
 const function parseBinding(isConst: boolean?): Syntax.Binding
-	const nameOpt = parseNameOptImpl("variable name")
+	local name, startLine, startColumn, endLine, endColumn = parseNameScalars("variable name")
+	name = name or "%error-id%"
 
-	local bindingName = nameOpt :: Syntax.Binding
-	if not bindingName then
-		bindingName = {
-			name = { value = "%error-id%" },
-			location = snapshot(),
-		} :: Syntax.Binding
-	end
-
-	const colonPos = if storeCstData and token_type == 58 then { line = token_start_line, column = token_start_col } else nil
+	const colonPos = if storeCstData and token_type == 58 then vector.create(token_start_line, token_start_col) else nil
 	const annotation = parseOptionalTypeImpl()
 
 	return {
-		name = bindingName.name,
-		location = bindingName.location,
+		name = { value = name },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		},
 		annotation = annotation,
 		colonPosition = colonPos,
 		isConst = isConst == true,
 	} :: Syntax.Binding
 end
 
-const function parseNameImpl(context: string?): Syntax.Binding
-	const name = parseNameOptImpl(context)
-	if name then
-		return name
-	end
-
-	return {
-		name = { value = "%error-id%" },
-		location = snapshot(),
-	}
-end
-
 const function parseVariadicArgumentTypePackImpl(): Syntax.AstTypePackVariadic | Syntax.AstTypePackGeneric
 	-- Generic: a...
 	if token_type == 281 and next_type == 262 then
-		const name = parseNameImpl("generic name")
-		const endLoc = snapshot()
+		const name, startLine, startColumn = parseNameScalars("generic name")
+		const endStartLine, endStartColumn = token_start_line, token_start_col
+		const endLine, endColumn = token_end_line, token_end_col
 
 		-- This will not fail because of the lookahead guard.
 		expectAndConsume(262, "generic type pack annotation")
@@ -2094,16 +2139,16 @@ const function parseVariadicArgumentTypePackImpl(): Syntax.AstTypePackVariadic |
 		const node = {
 			kind = "TypePackGeneric",
 			location = {
-				begin = name.location.begin,
-				end_ = endLoc.end_,
+				begin = vector.create(startLine, startColumn),
+				end_ = vector.create(endLine, endColumn),
 			},
-			genericName = name.name.value,
+			genericName = name :: string,
 		} :: Syntax.AstTypePackGeneric
 
 		if storeCstData then
 			node.cstNode = {
 				kind = "CstTypePackGeneric",
-				ellipsisPosition = endLoc.begin,
+				ellipsisPosition = vector.create(endStartLine, endStartColumn),
 			}
 		end
 
@@ -2128,9 +2173,9 @@ const function parseBindingList(
 	varargAnnotColonPos: { Syntax.Position? }?,
 	isConst: boolean?
 ): (boolean, Syntax.Location?, Syntax.AstTypePack?)
-	const localCommaPositions: { Syntax.Position } = {}
+	const localCommaPositions: { Syntax.Position }? = if commaPositions then {} else nil
 
-	if commaPositions and initialComma then
+	if localCommaPositions and initialComma then
 		table.insert(localCommaPositions, initialComma)
 	end
 
@@ -2142,14 +2187,14 @@ const function parseBindingList(
 			local tailAnnotation: Syntax.AstTypePack? = nil
 			if token_type == 58 then
 				if varargAnnotColonPos then
-					varargAnnotColonPos[1] = { line = token_start_line, column = token_start_col }
+					varargAnnotColonPos[1] = vector.create(token_start_line, token_start_col)
 				end
 
 				nextLexeme()
 				tailAnnotation = parseVariadicArgumentTypePackImpl()
 			end
 
-			if commaPositions then
+			if commaPositions and localCommaPositions then
 				for _, v in localCommaPositions do
 					table.insert(commaPositions, v)
 				end
@@ -2164,14 +2209,14 @@ const function parseBindingList(
 			break
 		end
 
-		if commaPositions then
-			table.insert(localCommaPositions, { line = token_start_line, column = token_start_col })
+		if localCommaPositions then
+			table.insert(localCommaPositions, vector.create(token_start_line, token_start_col))
 		end
 
 		nextLexeme()
 	end
 
-	if commaPositions then
+	if commaPositions and localCommaPositions then
 		for _, v in localCommaPositions do
 			table.insert(commaPositions, v)
 		end
@@ -2183,10 +2228,7 @@ end
 const function parseBlockNoScope(): Syntax.AstStatBlock
 	const body: { Syntax.AstStat } = {}
 
-	const prevPos = {
-		line = prev_end_line,
-		column = prev_end_col,
-	}
+	const prevPos = vector.create(prev_end_line, prev_end_col)
 
 	while not BlockFollow[token_type] do
 		const oldRecursion = recursionCounter
@@ -2200,8 +2242,7 @@ const function parseBlockNoScope(): Syntax.AstStatBlock
 			nextLexeme()
 			stat.hasSemicolon = true
 
-			stat.location.end_.line = prev_end_line
-			stat.location.end_.column = prev_end_col
+			stat.location.end_ = vector.create(prev_end_line, prev_end_col)
 		end
 
 		table.insert(body, stat)
@@ -2215,10 +2256,7 @@ const function parseBlockNoScope(): Syntax.AstStatBlock
 		kind = "StatBlock",
 		location = {
 			begin = prevPos,
-			end_ = {
-				line = token_start_line,
-				column = token_start_col,
-			},
+			end_ = vector.create(token_start_line, token_start_col),
 		},
 		body = body,
 		hasEnd = false,
@@ -2236,7 +2274,7 @@ end
 
 -- if exp then block {elseif exp then block} [else block] end
 const function parseIfImpl(): Syntax.AstStatIf
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 
 	nextLexeme()
 
@@ -2248,15 +2286,15 @@ const function parseIfImpl(): Syntax.AstStatIf
 	local thenLocation: Syntax.Location? = nil
 	if expectAndConsume(308, "if statement") then
 		thenLocation = {
-			begin = { line = Then_start_line, column = Then_start_col },
-			end_ = { line = Then_end_line, column = Then_end_col },
+			begin = vector.create(Then_start_line, Then_start_col),
+			end_ = vector.create(Then_end_line, Then_end_col),
 		}
 	end
 
 	const thenbody = parseBlock()
 
 	local elsebody: Syntax.AstStat? = nil
-	local end_ = start
+	local endLine, endColumn = token_end_line, token_end_col
 	local elseLocation: Syntax.Location? = nil
 
 	if token_type == 295 then
@@ -2266,7 +2304,7 @@ const function parseIfImpl(): Syntax.AstStatIf
 
 		elseLocation = snapshot()
 		elsebody = parseIfImpl()
-		end_ = elsebody.location
+		endLine, endColumn = elsebody.location.end_.x, elsebody.location.end_.y
 
 		recursionCounter = oldRecursionCount
 	else
@@ -2287,11 +2325,11 @@ const function parseIfImpl(): Syntax.AstStatIf
 			nextLexeme()
 
 			const body = parseBlock()
-			body.location.begin = { line = ThenElse_end_line, column = ThenElse_end_col }
+			body.location.begin = vector.create(ThenElse_end_line, ThenElse_end_col)
 			elsebody = body
 		end
 
-		end_ = snapshot()
+		endLine, endColumn = token_end_line, token_end_col
 
 		const hasEnd = expectMatchEndAndConsume(296, ThenElse_type, ThenElse_start_line, ThenElse_start_col)
 
@@ -2307,8 +2345,8 @@ const function parseIfImpl(): Syntax.AstStatIf
 	return {
 		kind = "StatIf",
 		location = {
-			begin = start.begin,
-			end_ = end_.end_,
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
 		},
 		condition = cond,
 		thenbody = thenbody,
@@ -2320,7 +2358,7 @@ end
 
 -- while exp do block end
 const function parseWhileImpl(): Syntax.AstStatWhile
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 	nextLexeme()
 
 	const cond = ParserFunctions.parseExpr()
@@ -2338,7 +2376,7 @@ const function parseWhileImpl(): Syntax.AstStatWhile
 
 	functionStack[#functionStack].loopDepth -= 1
 
-	const end_ = snapshot()
+	const endLine, endColumn = token_end_line, token_end_col
 	const hasEnd = expectMatchEndAndConsume(296, Do_type, Do_start_line, Do_start_col)
 
 	body.hasEnd = hasEnd
@@ -2346,22 +2384,22 @@ const function parseWhileImpl(): Syntax.AstStatWhile
 	return {
 		kind = "StatWhile",
 		location = {
-			begin = start.begin,
-			end_ = end_.end_,
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
 		},
 		condition = cond,
 		body = body,
 		hasDo = hasDo,
 		doLocation = {
-			begin = { line = Do_start_line, column = Do_start_col },
-			end_ = { line = Do_end_line, column = Do_end_col },
+			begin = vector.create(Do_start_line, Do_start_col),
+			end_ = vector.create(Do_end_line, Do_end_col),
 		},
 	} :: Syntax.AstStatWhile
 end
 
 -- repeat block until exp
 const function parseRepeatImpl(): Syntax.AstStatRepeat
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 
 	const Repeat_type = token_type
 	const Repeat_start_line, Repeat_start_col = token_start_line, token_start_col
@@ -2376,11 +2414,11 @@ const function parseRepeatImpl(): Syntax.AstStatRepeat
 
 	functionStack[#functionStack].loopDepth -= 1
 
-	local untilPosition = { line = 0, column = 0 }
+	local untilLine, untilColumn = 0, 0
 	const hasUntil = expectMatchEndAndConsume(310, Repeat_type, Repeat_start_line, Repeat_start_col)
 	body.hasEnd = hasUntil
 	if hasUntil then
-		untilPosition = { line = prev_start_line, column = prev_start_col }
+		untilLine, untilColumn = prev_start_line, prev_start_col
 	end
 
 	const cond = ParserFunctions.parseExpr()
@@ -2389,7 +2427,10 @@ const function parseRepeatImpl(): Syntax.AstStatRepeat
 
 	const node = {
 		kind = "StatRepeat",
-		location = { begin = start.begin, end_ = cond.location.end_ },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = cond.location.end_,
+		},
 		condition = cond,
 		body = body,
 		hasUntil = hasUntil,
@@ -2398,7 +2439,7 @@ const function parseRepeatImpl(): Syntax.AstStatRepeat
 	if storeCstData then
 		node.cstNode = {
 			kind = "CstStatRepeat",
-			untilPosition = untilPosition,
+			untilPosition = vector.create(untilLine, untilColumn),
 		}
 	end
 
@@ -2407,30 +2448,33 @@ end
 
 -- do block end
 const function parseDoImpl(): Syntax.AstStatBlock
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 
 	const Do_type = token_type
 	const Do_start_line, Do_start_col = token_start_line, token_start_col
 
 	nextLexeme() -- do
 
-	const statsStart = if storeCstData then snapshot() else nil
+	const statsStartLine, statsStartColumn = token_start_line, token_start_col
 
 	const body = parseBlock()
-	body.location.begin = start.begin
+	body.location.begin = vector.create(startLine, startColumn)
 
-	const endLocation = snapshot()
+	const endStartLine, endStartColumn = token_start_line, token_start_col
+	const endLine, endColumn = token_end_line, token_end_col
 	body.hasEnd = expectMatchEndAndConsume(296, Do_type, Do_start_line, Do_start_col)
 
 	if body.hasEnd then
-		body.location.end_ = endLocation.end_
+		body.location.end_ = vector.create(endLine, endColumn)
 	end
 
-	if storeCstData and statsStart then
+	if storeCstData then
 		body.cstNode = {
 			kind = "CstStatDo",
-			statsStart = statsStart.begin,
-			endPosition = if body.hasEnd then endLocation.begin else { line = 0, column = 0 },
+			statsStart = vector.create(statsStartLine, statsStartColumn),
+			endPosition = if body.hasEnd
+				then vector.create(endStartLine, endStartColumn)
+				else vector.create(0, 0),
 		} :: Syntax.CstStatDo
 	end
 
@@ -2490,7 +2534,7 @@ const function parseExprListImpl(result: { Syntax.AstExpr }, commaPositions: { S
 
 	while token_type == 44 do
 		if commaPositions then
-			table.insert(commaPositions, { line = token_start_line, column = token_start_col })
+			table.insert(commaPositions, vector.create(token_start_line, token_start_col))
 		end
 
 		nextLexeme()
@@ -2507,20 +2551,22 @@ end
 -- for binding `=' exp `,' exp [`,' exp] do block end |
 -- for bindinglist in explist do block end |
 const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 	nextLexeme() -- for
 
 	const varname = parseBinding()
 
 	if token_type == 61 then
-		const equalsPosition = { line = token_start_line, column = token_start_col }
+		const equalsPosition = if storeCstData then vector.create(token_start_line, token_start_col) else nil
 		nextLexeme()
 
 		const from = ParserFunctions.parseExpr()
 
-		local endCommaPosition = { line = 0, column = 0 }
+		local endCommaPosition: Syntax.Position? = if storeCstData then vector.create(0, 0) else nil
 		if expectAndConsume(44, "index range") then
-			endCommaPosition = { line = prev_start_line, column = prev_start_col }
+			if endCommaPosition then
+				endCommaPosition = vector.create(prev_start_line, prev_start_col)
+			end
 		end
 
 		const to = ParserFunctions.parseExpr()
@@ -2529,7 +2575,9 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 		local step: Syntax.AstExpr? = nil
 
 		if token_type == 44 then
-			stepCommaPosition = { line = token_start_line, column = token_start_col }
+			if storeCstData then
+				stepCommaPosition = vector.create(token_start_line, token_start_col)
+			end
 			nextLexeme()
 			step = ParserFunctions.parseExpr()
 		end
@@ -2551,13 +2599,16 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 		functionStack[#functionStack].loopDepth -= 1
 		restoreLocals(localsBegin)
 
-		const end_ = { line = token_end_line, column = token_end_col }
+		const end_ = vector.create(token_end_line, token_end_col)
 		const hasEnd = expectMatchEndAndConsume(296, Do_type, Do_start_line, Do_start_col)
 		body.hasEnd = hasEnd
 
 		const node = {
 			kind = "StatFor",
-			location = { begin = start.begin, end_ = end_ },
+			location = {
+				begin = vector.create(startLine, startColumn),
+				end_ = end_,
+			},
 			var = var,
 			from = from,
 			to = to,
@@ -2565,12 +2616,12 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 			body = body,
 			hasDo = hasDo,
 			doLocation = {
-				begin = { line = Do_start_line, column = Do_start_col },
-				end_ = { line = Do_end_line, column = Do_end_col },
+				begin = vector.create(Do_start_line, Do_start_col),
+				end_ = vector.create(Do_end_line, Do_end_col),
 			},
 		} :: Syntax.AstStatFor
 
-		if storeCstData then
+		if equalsPosition and endCommaPosition then
 			node.cstNode = {
 				kind = "CstStatFor",
 				annotationColonPosition = varname.colonPosition,
@@ -2583,10 +2634,10 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 		return node
 	else
 		const names = { varname }
-		const varsCommaPosition: { Syntax.Position } = {}
+		const varsCommaPosition: { Syntax.Position }? = if storeCstData then {} else nil
 
 		if token_type == 44 then
-			const initialCommaPos = { line = token_start_line, column = token_start_col }
+			const initialCommaPos = if storeCstData then vector.create(token_start_line, token_start_col) else nil
 			nextLexeme()
 			parseBindingList(names, false, varsCommaPosition, initialCommaPos)
 		end
@@ -2596,8 +2647,8 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 
 		const values: { Syntax.AstExpr } = {}
 
-		const valuesCommaPositions: { Syntax.Position } = {}
-		parseExprListImpl(values, storeCstData and valuesCommaPositions or nil)
+		const valuesCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
+		parseExprListImpl(values, valuesCommaPositions)
 
 		const Do_type = token_type
 
@@ -2619,14 +2670,17 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 		functionStack[#functionStack].loopDepth -= 1
 		restoreLocals(localsBegin)
 
-		const end_ = { line = token_end_line, column = token_end_col }
+		const end_ = vector.create(token_end_line, token_end_col)
 
 		const hasEnd = expectMatchEndAndConsume(296, Do_type, Do_start_line, Do_start_col)
 		body.hasEnd = hasEnd
 
 		const node = {
 			kind = "StatForIn",
-			location = { begin = start.begin, end_ = end_ },
+			location = {
+				begin = vector.create(startLine, startColumn),
+				end_ = end_,
+			},
 			vars = vars,
 			values = values,
 			body = body,
@@ -2634,12 +2688,12 @@ const function parseForImpl(): Syntax.AstStatFor | Syntax.AstStatForIn
 			inLocation = inLocation,
 			hasDo = hasDo,
 			doLocation = {
-				begin = { line = Do_start_line, column = Do_start_col },
-				end_ = { line = Do_end_line, column = Do_end_col },
+				begin = vector.create(Do_start_line, Do_start_col),
+				end_ = vector.create(Do_end_line, Do_end_col),
 			},
 		} :: Syntax.AstStatForIn
 
-		if storeCstData then
+		if varsCommaPosition and valuesCommaPositions then
 			node.cstNode = {
 				kind = "CstStatForIn",
 				varsAnnotationColonPositions = extractAnnotationColonPositions(names),
@@ -2654,9 +2708,9 @@ end
 
 -- NAME
 const function parseNameExprImpl(context: string): Syntax.AstExprLocal | Syntax.AstExprGlobal | Syntax.AstExprError
-	const nameOpt = parseNameOptImpl(context)
+	const name, startLine, startColumn, endLine, endColumn = parseNameScalars(context)
 
-	if not nameOpt then
+	if not name then
 		return {
 			kind = "ExprError",
 			location = snapshot(),
@@ -2665,8 +2719,11 @@ const function parseNameExprImpl(context: string): Syntax.AstExprLocal | Syntax.
 		}
 	end
 
-	const name = nameOpt
-	const local_ = localMap[name.name.value]
+	const nameLocation = {
+		begin = vector.create(startLine, startColumn),
+		end_ = vector.create(endLine, endColumn),
+	}
+	const local_ = localMap[name]
 
 	if local_ then
 		if local_.functionDepth < (typeFunctionDepth or 0) then
@@ -2675,7 +2732,7 @@ const function parseNameExprImpl(context: string): Syntax.AstExprLocal | Syntax.
 
 		return {
 			kind = "ExprLocal",
-			location = name.location,
+			location = nameLocation,
 			["local"] = local_,
 			upvalue = local_.functionDepth ~= (#functionStack - 1),
 		}
@@ -2683,16 +2740,15 @@ const function parseNameExprImpl(context: string): Syntax.AstExprLocal | Syntax.
 
 	return {
 		kind = "ExprGlobal",
-		location = name.location,
-		name = name.name.value,
+		location = nameLocation,
+		name = name,
 	}
 end
 
 -- funcname ::= Name {`.' Name} [`:' Name]
-const function parseFunctionName(hasRef: { boolean }, debugnameRef: { string? }): Syntax.AstExprIndexName
-	if token_type == 281 then
-		debugnameRef[1] = token_string
-	end
+const function parseFunctionName(): (Syntax.AstExprIndexName, boolean, string?)
+	local hasSelf = false
+	local debugname = if token_type == 281 then token_string else nil
 
 	-- parse funcname into a chain of indexing operators
 	local expr = parseNameExprImpl("function name")
@@ -2700,23 +2756,28 @@ const function parseFunctionName(hasRef: { boolean }, debugnameRef: { string? })
 	const oldRecursionCount = recursionCounter
 
 	while token_type == 46 do
-		const opPosition = { line = token_start_line, column = token_start_col }
+		const opPosition = vector.create(token_start_line, token_start_col)
 		nextLexeme()
 
-		const name = parseNameImpl("field name")
+		local name, startLine, startColumn, endLine, endColumn = parseNameScalars("field name")
+		name = name or "%error-id%"
+		const nameLocation = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		}
 
 		-- while we could concatenate the name chain, for now let's just write the short name
-		debugnameRef[1] = name.name.value
+		debugname = name
 
 		expr = {
 			kind = "ExprIndexName",
 			location = {
 				begin = expr.location.begin,
-				end_ = name.location.end_,
+				end_ = nameLocation.end_,
 			},
 			expr = expr,
-			index = name.name.value,
-			indexLocation = name.location,
+			index = name,
+			indexLocation = nameLocation,
 			opPosition = opPosition,
 			op = 46,
 		}
@@ -2729,31 +2790,36 @@ const function parseFunctionName(hasRef: { boolean }, debugnameRef: { string? })
 
 	-- finish with :
 	if token_type == 58 then
-		const opPosition = { line = token_start_line, column = token_start_col }
+		const opPosition = vector.create(token_start_line, token_start_col)
 		nextLexeme()
 
-		const name = parseNameImpl("method name")
+		local name, startLine, startColumn, endLine, endColumn = parseNameScalars("method name")
+		name = name or "%error-id%"
+		const nameLocation = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		}
 
 		-- while we could concatenate the name chain, for now let's just write the short name
-		debugnameRef[1] = name.name.value
+		debugname = name
 
 		expr = {
 			kind = "ExprIndexName",
 			location = {
 				begin = expr.location.begin,
-				end_ = name.location.end_,
+				end_ = nameLocation.end_,
 			},
 			expr = expr,
-			index = name.name.value,
-			indexLocation = name.location,
+			index = name,
+			indexLocation = nameLocation,
 			opPosition = opPosition,
 			op = 58,
 		}
 
-		hasRef[1] = true
+		hasSelf = true
 	end
 
-	return expr :: Syntax.AstExprIndexName
+	return expr :: Syntax.AstExprIndexName, hasSelf, debugname
 end
 
 const function shouldParseTypePack()
@@ -2773,13 +2839,13 @@ end
 const function parseTypePackImpl(): Syntax.AstTypePackVariadic | Syntax.AstTypePackGeneric
 	-- Variadic: ...T
 	if token_type == 262 then
-		const start = snapshot()
+		const startLine, startColumn = token_start_line, token_start_col
 		nextLexeme()
 		const varTy = parseTypeImpl(false)
 		return {
 			kind = "TypePackVariadic",
 			location = {
-				begin = start.begin,
+				begin = vector.create(startLine, startColumn),
 				end_ = varTy.location.end_,
 			},
 			variadicType = varTy,
@@ -2787,8 +2853,9 @@ const function parseTypePackImpl(): Syntax.AstTypePackVariadic | Syntax.AstTypeP
 
 		-- Generic: a...
 	elseif token_type == 281 and next_type == 262 then
-		const name = parseNameImpl("generic name")
-		const endLoc = snapshot()
+		const name, startLine, startColumn = parseNameScalars("generic name")
+		const endStartLine, endStartColumn = token_start_line, token_start_col
+		const endLine, endColumn = token_end_line, token_end_col
 
 		-- This will not fail because of the lookahead guard.
 		expectAndConsume(262, "generic type pack annotation")
@@ -2796,16 +2863,16 @@ const function parseTypePackImpl(): Syntax.AstTypePackVariadic | Syntax.AstTypeP
 		const node = {
 			kind = "TypePackGeneric",
 			location = {
-				begin = name.location.begin,
-				end_ = endLoc.end_,
+				begin = vector.create(startLine, startColumn),
+				end_ = vector.create(endLine, endColumn),
 			},
-			genericName = name.name.value,
+			genericName = name :: string,
 		}
 
 		if storeCstData then
 			node.cstNode = {
 				kind = "CstTypePackGeneric",
-				ellipsisPosition = endLoc.begin,
+				ellipsisPosition = vector.create(endStartLine, endStartColumn),
 			}
 		end
 
@@ -2820,7 +2887,7 @@ const function parseSimpleTypeOrPackImpl(): (Syntax.AstType?, Syntax.AstTypePack
 	const oldRec = recursionCounter
 	-- recursion counter is incremented in parseSimpleType
 
-	const begin = snapshot()
+	const beginLine, beginColumn = token_start_line, token_start_col
 
 	const type_, typePack = ParserFunctions.parseSimpleType(true, false)
 
@@ -2830,7 +2897,7 @@ const function parseSimpleTypeOrPackImpl(): (Syntax.AstType?, Syntax.AstTypePack
 
 	recursionCounter = oldRec
 
-	return parseTypeSuffixImpl(type_, begin), nil
+	return parseTypeSuffixImpl(type_, beginLine, beginColumn), nil
 end
 
 const function parseGenericTypeListImpl(
@@ -2839,16 +2906,20 @@ const function parseGenericTypeListImpl(
 	commaPosRef: { Syntax.Position }?,
 	closePosRef: { Syntax.Position }?
 ): ({ Syntax.AstGenericType }, { Syntax.AstGenericTypePack })
+	if token_type ~= 60 then
+		return EmptyArray :: { Syntax.AstGenericType }, EmptyArray :: { Syntax.AstGenericTypePack }
+	end
+
 	const names: { Syntax.AstGenericType } = {}
 	const namePacks: { Syntax.AstGenericTypePack } = {}
-	const localCommaPositions: { Syntax.Position } = {}
+	const localCommaPositions: { Syntax.Position }? = if commaPosRef then {} else nil
 
 	if token_type == 60 then
 		const begin_type = token_type
 		const begin_start_line, begin_start_col = token_start_line, token_start_col
 
 		if openPosRef then
-			openPosRef[1] = { line = begin_start_line, column = begin_start_col }
+			openPosRef[1] = vector.create(begin_start_line, begin_start_col)
 		end
 
 		nextLexeme()
@@ -2858,23 +2929,23 @@ const function parseGenericTypeListImpl(
 
 		while true do
 			const nameLoc = snapshot()
-			const nameBinding = parseNameImpl()
-			const name = nameBinding.name.value
+			local name = parseNameScalars()
+			name = name or "%error-id%"
 
 			if token_type == 262 or seenPack then
 				seenPack = true
-				local ellipsisPosition = { line = 0, column = 0 }
+				local ellipsisLine, ellipsisColumn = 0, 0
 
 				if token_type ~= 262 then
 					report(snapshot(), "Generic types come before generic type packs")
 				else
-					ellipsisPosition = { line = token_start_line, column = token_start_col }
+					ellipsisLine, ellipsisColumn = token_start_line, token_start_col
 					nextLexeme()
 				end
 
 				if withDefaultValues and token_type == 61 then
 					seenDefault = true
-					const equalsPosition = { line = token_start_line, column = token_start_col }
+					const equalsLine, equalsColumn = token_start_line, token_start_col
 					nextLexeme()
 
 					local typePack: Syntax.AstTypePack? = nil
@@ -2898,8 +2969,8 @@ const function parseGenericTypeListImpl(
 					if storeCstData then
 						node.cstNode = {
 							kind = "CstGenericTypePack",
-							ellipsisPosition = ellipsisPosition,
-							defaultEqualsPosition = equalsPosition,
+							ellipsisPosition = vector.create(ellipsisLine, ellipsisColumn),
+							defaultEqualsPosition = vector.create(equalsLine, equalsColumn),
 						} :: Syntax.CstGenericTypePack
 					end
 
@@ -2919,7 +2990,7 @@ const function parseGenericTypeListImpl(
 					if storeCstData then
 						node.cstNode = {
 							kind = "CstGenericTypePack",
-							ellipsisPosition = ellipsisPosition,
+							ellipsisPosition = vector.create(ellipsisLine, ellipsisColumn),
 							defaultEqualsPosition = nil,
 						} :: Syntax.CstGenericTypePack
 					end
@@ -2929,7 +3000,7 @@ const function parseGenericTypeListImpl(
 			else
 				if withDefaultValues and token_type == 61 then
 					seenDefault = true
-					const equalsPosition = { line = token_start_line, column = token_start_col }
+					const equalsLine, equalsColumn = token_start_line, token_start_col
 					nextLexeme()
 
 					const defaultType = parseTypeImpl()
@@ -2944,7 +3015,7 @@ const function parseGenericTypeListImpl(
 					if storeCstData then
 						node.cstNode = {
 							kind = "CstGenericType",
-							defaultEqualsPosition = equalsPosition,
+							defaultEqualsPosition = vector.create(equalsLine, equalsColumn),
 						} :: Syntax.CstGenericType
 					end
 					table.insert(names, node)
@@ -2971,8 +3042,8 @@ const function parseGenericTypeListImpl(
 			end
 
 			if token_type == 44 then
-				if commaPosRef then
-					table.insert(localCommaPositions, { line = token_start_line, column = token_start_col })
+					if localCommaPositions then
+						table.insert(localCommaPositions, vector.create(token_start_line, token_start_col))
 				end
 				nextLexeme()
 
@@ -2986,11 +3057,11 @@ const function parseGenericTypeListImpl(
 		end
 
 		if expectMatchAndConsume(62, begin_type, begin_start_line, begin_start_col) and closePosRef then
-			closePosRef[1] = { line = prev_start_line, column = prev_start_col }
+			closePosRef[1] = vector.create(prev_start_line, prev_start_col)
 		end
 	end
 
-	if commaPosRef then
+	if commaPosRef and localCommaPositions then
 		for _, v in localCommaPositions do
 			table.insert(commaPosRef, v)
 		end
@@ -3006,7 +3077,7 @@ const function parseOptionalReturnTypeImpl(returnSpecifierPosRef: { Syntax.Posit
 		end
 
 		if returnSpecifierPosRef then
-			returnSpecifierPosRef[1] = { line = token_start_line, column = token_start_col }
+			returnSpecifierPosRef[1] = vector.create(token_start_line, token_start_col)
 		end
 
 		nextLexeme()
@@ -3042,6 +3113,10 @@ const function prepareFunctionArgumentsImpl(start: Syntax.Location, hasself: boo
 		})
 	end
 
+	if #args == 0 then
+		return selfLocal, EmptyArray :: { Syntax.AstLocal }
+	end
+
 	const vars: { Syntax.AstLocal } = {}
 	for _, arg in args do
 		table.insert(vars, pushLocal(arg))
@@ -3054,7 +3129,11 @@ end
 -- parlist ::= bindinglist [`,' `...'] | `...'
 const function parseFunctionBodyImpl(
 	hasself: boolean,
-	matchFunction: Syntax.Lexeme,
+	matchFunctionType: number,
+	matchFunctionLine: number,
+	matchFunctionColumn: number,
+	matchFunctionEndLine: number,
+	matchFunctionEndColumn: number,
 	debugname: string?,
 	localName: string?,
 	localNameLocation: Syntax.Location?,
@@ -3062,7 +3141,11 @@ const function parseFunctionBodyImpl(
 	cstAttrLists: { Syntax.CstAttrList }?,
 	isConst: boolean?
 ): (Syntax.AstExprFunction, Syntax.AstLocal?)
-	local start = matchFunction.location
+	const matchFunctionLocation = {
+		begin = vector.create(matchFunctionLine, matchFunctionColumn),
+		end_ = vector.create(matchFunctionEndLine, matchFunctionEndColumn),
+	}
+	local start = matchFunctionLocation
 	if #attributes > 0 then
 		start = attributes[1].location
 	end
@@ -3072,14 +3155,14 @@ const function parseFunctionBodyImpl(
 		cstNode = {
 			kind = "CstExprFunction",
 			attrLists = cstAttrLists or {},
-			functionKeywordPosition = matchFunction.location.begin,
-			openGenericsPosition = { line = 0, column = 0 },
+			functionKeywordPosition = matchFunctionLocation.begin,
+			openGenericsPosition = vector.create(0, 0),
 			genericsCommaPositions = {},
-			closeGenericsPosition = { line = 0, column = 0 },
+			closeGenericsPosition = vector.create(0, 0),
 			argsAnnotationColonPositions = {},
 			argsCommaPositions = {},
-			varargAnnotationColonPosition = { line = 0, column = 0 },
-			returnSpecifierPosition = { line = 0, column = 0 },
+			varargAnnotationColonPosition = vector.create(0, 0),
+			returnSpecifierPosition = vector.create(0, 0),
 		} :: Syntax.CstExprFunction
 	end
 
@@ -3114,12 +3197,13 @@ const function parseFunctionBodyImpl(
 
 	matchRecovery[41] += 1
 
-	const args = {} :: { Syntax.Binding }
+	local args = EmptyArray :: { Syntax.Binding }
 	local vararg = false
 	local varargLocation: Syntax.Location? = nil
 	local varargAnnotation: Syntax.AstTypePack? = nil
 
 	if token_type ~= 41 then
+		args = {}
 		const vaAnnotPosRef = cstNode and { cstNode.varargAnnotationColonPosition :: Syntax.Position? } or nil
 
 		vararg, varargLocation, varargAnnotation =
@@ -3133,8 +3217,8 @@ const function parseFunctionBodyImpl(
 	local argLocation: Syntax.Location? = nil
 	if Paren_type == 40 and token_type == 41 then
 		argLocation = {
-			begin = { line = Paren_line, column = Paren_col },
-			end_ = { line = token_end_line, column = token_end_col },
+			begin = vector.create(Paren_line, Paren_col),
+			end_ = vector.create(token_end_line, token_end_col),
 		}
 	end
 
@@ -3172,18 +3256,18 @@ const function parseFunctionBodyImpl(
 
 	restoreLocals(localsBegin)
 
-	const end_ = snapshot()
+	const endPosition = vector.create(token_end_line, token_end_col)
 	const hasEnd = expectMatchEndAndConsume(
 		296,
-		matchFunction.type,
-		matchFunction.location.begin.line,
-		matchFunction.location.begin.column
+		matchFunctionType,
+		matchFunctionLine,
+		matchFunctionColumn
 	)
 	body.hasEnd = hasEnd
 
 	const node = {
 		kind = "ExprFunction",
-		location = { begin = start.begin, end_ = end_.end_ },
+		location = { begin = start.begin, end_ = endPosition },
 		attributes = attributes,
 		generics = generics,
 		genericPacks = genericPacks,
@@ -3213,19 +3297,19 @@ const function parseFunctionStatImpl(
 	attributeStartLocation: Syntax.Location?,
 	cstAttrLists: { Syntax.CstAttrList }?
 ): Syntax.AstStatFunction
-	local start = snapshot()
+	local startPosition = vector.create(token_start_line, token_start_col)
 	if attributeStartLocation ~= nil then
-		start = attributeStartLocation
+		startPosition = attributeStartLocation.begin
 	elseif #attributes > 0 then
-		start = attributes[1].location
+		startPosition = attributes[1].location.begin
 	end
 
-	const matchFunction = get_lexeme()
+	const matchFunctionType = token_type
+	const matchFunctionLine, matchFunctionColumn = token_start_line, token_start_col
+	const matchFunctionEndLine, matchFunctionEndColumn = token_end_line, token_end_col
 	nextLexeme()
 
-	const hasRef = { false }
-	const debugnameRef: { string? } = {}
-	local expr: Syntax.AstExpr = parseFunctionName(hasRef, debugnameRef)
+	local expr: Syntax.AstExpr, hasSelf, debugname = parseFunctionName()
 
 	if not isExprLValue(expr) then
 		expr = if LuauExportValueSyntax
@@ -3235,14 +3319,27 @@ const function parseFunctionStatImpl(
 
 	matchRecovery[296] += 1
 
-	const body = parseFunctionBodyImpl(hasRef[1], matchFunction, debugnameRef[1], nil, nil, attributes, nil, false)
+	const body = parseFunctionBodyImpl(
+		hasSelf,
+		matchFunctionType,
+		matchFunctionLine,
+		matchFunctionColumn,
+		matchFunctionEndLine,
+		matchFunctionEndColumn,
+		debugname,
+		nil,
+		nil,
+		attributes,
+		nil,
+		false
+	)
 
 	matchRecovery[296] -= 1
 
 	const node = {
 		kind = "StatFunction",
 		location = {
-			begin = start.begin,
+			begin = startPosition,
 			end_ = body.location.end_,
 		},
 		name = expr,
@@ -3253,7 +3350,7 @@ const function parseFunctionStatImpl(
 		node.cstNode = {
 			kind = "CstStatFunction",
 			attrLists = cstAttrLists or {},
-			functionKeywordPosition = matchFunction.location.begin,
+			functionKeywordPosition = vector.create(matchFunctionLine, matchFunctionColumn),
 		}
 	end
 
@@ -3315,7 +3412,7 @@ const function tableSeparator(): number?
 end
 
 const function cstSeparatorPosition(separator: number?): Syntax.Position
-	return if separator == nil then { line = 0, column = 0 } else { line = token_start_line, column = token_start_col }
+	return if separator == nil then vector.create(0, 0) else vector.create(token_start_line, token_start_col)
 end
 
 -- tableconstructor ::= `{' [fieldlist] `}'
@@ -3324,9 +3421,9 @@ end
 -- fieldsep ::= `,' | `;'
 const function parseTableConstructorImpl(): Syntax.AstExprTable
 	const items = {} :: { Syntax.AstExprTableItem }
-	const cstItems: { Syntax.CstExprTableItem } = {}
+	const cstItems: { Syntax.CstExprTableItem }? = if storeCstData then {} else nil
 
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 
 	const brace_type, brace_line, brace_col = token_type, token_start_line, token_start_col
 	expectAndConsume(123, "table literal")
@@ -3343,18 +3440,24 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 		local equalsPos: Syntax.Position? = nil
 
 		if token_type == 91 then
-			indexerOpenPos = { line = token_start_line, column = token_start_col }
+			if cstItems then
+				indexerOpenPos = vector.create(token_start_line, token_start_col)
+			end
 			const bracket_type, bracket_line, bracket_col = token_type, token_start_line, token_start_col
 			nextLexeme()
 
 			const key = ParserFunctions.parseExpr()
 
 			if expectMatchAndConsume(93, bracket_type, bracket_line, bracket_col) then
-				indexerClosePos = { line = prev_start_line, column = prev_start_col }
+				if cstItems then
+					indexerClosePos = vector.create(prev_start_line, prev_start_col)
+				end
 			end
 
 			if expectAndConsume(61, "table field") then
-				equalsPos = { line = prev_start_line, column = prev_start_col }
+				if cstItems then
+					equalsPos = vector.create(prev_start_line, prev_start_col)
+				end
 			end
 
 			const value = ParserFunctions.parseExpr()
@@ -3368,7 +3471,7 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 				} :: Syntax.AstExprTableItem
 			)
 
-			if storeCstData then
+			if cstItems then
 				const separator = tableSeparator()
 				table.insert(
 					cstItems,
@@ -3383,23 +3486,30 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 				)
 			end
 		elseif token_type == 281 and next_type == 61 then
-			const name = parseNameImpl("table field")
+			const name, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+				parseNameScalars("table field")
+			const fieldName = name :: string
 
 			if expectAndConsume(61, "table field") then
-				equalsPos = { line = prev_start_line, column = prev_start_col }
+				if cstItems then
+					equalsPos = vector.create(prev_start_line, prev_start_col)
+				end
 			end
 
 			const key = {
 				kind = "ExprConstantString",
-				location = name.location,
-				value = name.name.value,
+				location = {
+					begin = vector.create(nameStartLine, nameStartColumn),
+					end_ = vector.create(nameEndLine, nameEndColumn),
+				},
+				value = fieldName,
 				quoteStyle = QuoteStyle.Unquoted,
 			}
 
 			const value = ParserFunctions.parseExpr()
 
 			if value.kind == "ExprFunction" then
-				value.debugname = name.name.value
+				value.debugname = fieldName
 			end
 
 			table.insert(
@@ -3411,7 +3521,7 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 				} :: Syntax.AstExprTableItem
 			)
 
-			if storeCstData then
+			if cstItems then
 				const separator = tableSeparator()
 				table.insert(
 					cstItems,
@@ -3433,7 +3543,7 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 				} :: Syntax.AstExprTableItem
 			)
 
-			if storeCstData then
+			if cstItems then
 				const separator = tableSeparator()
 				table.insert(
 					cstItems,
@@ -3458,18 +3568,21 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 		end
 	end
 
-	local end_ = snapshot()
+	local endLine, endColumn = token_end_line, token_end_col
 	if not expectMatchAndConsume(125, brace_type, brace_line, brace_col) then
-		end_ = getprev()
+		endLine, endColumn = prev_end_line, prev_end_col
 	end
 
 	const node = {
 		kind = "ExprTable",
-		location = { begin = start.begin, end_ = end_.end_ },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		},
 		items = items,
 	} :: Syntax.AstExprTable
 
-	if storeCstData then
+	if cstItems then
 		node.cstNode = {
 			kind = "CstExprTable",
 			items = cstItems,
@@ -3573,7 +3686,7 @@ const function parseCallListImpl(commaPositions: { Syntax.Position }?): (
 	Syntax.Position?
 )
 	if token_type == 40 then
-		const argStart = { line = token_end_line, column = token_end_col }
+		const argStart = vector.create(token_end_line, token_end_col)
 		const paren_type, paren_line, paren_col = token_type, token_start_line, token_start_col
 
 		nextLexeme()
@@ -3584,30 +3697,33 @@ const function parseCallListImpl(commaPositions: { Syntax.Position }?): (
 			parseExprListImpl(args, commaPositions)
 		end
 
-		const end_ = snapshot()
+		const endStartLine, endStartColumn = token_start_line, token_start_col
+		const endLine, endColumn = token_end_line, token_end_col
 		local closeParenPosition: Syntax.Position? = nil
 		if expectMatchAndConsume(41, paren_type, paren_line, paren_col) then
-			closeParenPosition = end_.begin
+			if commaPositions then
+				closeParenPosition = vector.create(endStartLine, endStartColumn)
+			end
 		end
 
 		return args,
 			{
 				begin = argStart,
-				end_ = end_.end_,
+				end_ = vector.create(endLine, endColumn),
 			},
 			{
-				begin = { line = paren_line, column = paren_col },
-				end_ = { line = prev_start_line, column = prev_start_col },
+				begin = vector.create(paren_line, paren_col),
+				end_ = vector.create(prev_start_line, prev_start_col),
 			},
 			closeParenPosition
 	elseif token_type == 123 then
-		const argStart = { line = token_end_line, column = token_end_col }
+		const argStart = vector.create(token_end_line, token_end_col)
 		const expr = parseTableConstructorImpl()
 
 		return { expr } :: { Syntax.AstExpr },
 			{
 				begin = argStart,
-				end_ = { line = prev_end_line, column = prev_end_col },
+				end_ = vector.create(prev_end_line, prev_end_col),
 			},
 			expr.location,
 			nil
@@ -3623,13 +3739,13 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 	if token_type == 284 then
 		const loc = snapshot()
 		const name = token_string or ""
-		const type_ = validateAttribute(loc, name, attributes, {})
+		const type_ = validateAttribute(loc, name, attributes, EmptyArray :: { Syntax.AstExpr })
 		nextLexeme()
 		const attr = {
 			kind = "Attr",
 			location = loc,
 			type = type_ or "Unknown",
-			args = {},
+			args = EmptyArray :: { Syntax.AstExpr },
 			name = name,
 		} :: Syntax.AstAttr
 
@@ -3647,37 +3763,42 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 		const open_type = token_type
 		const open_start_line, open_start_col = token_start_line, token_start_col
 		const openLocation = {
-			begin = { line = open_start_line, column = open_start_col },
-			end_ = { line = open_start_line, column = open_start_col },
+			begin = vector.create(open_start_line, open_start_col),
+			end_ = vector.create(open_start_line, open_start_col),
 		}
-		const commaPositions: { Syntax.Position } = {}
+		const commaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 
 		nextLexeme()
 		if token_type ~= 93 then
 			while true do
-				const name = parseNameImpl("attribute name")
-				const nameLoc = name.location
-				const attrName = name.name.value
+				local attrName, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+					parseNameScalars("attribute name")
+				attrName = attrName or "%error-id%"
+				const nameLoc = {
+					begin = vector.create(nameStartLine, nameStartColumn),
+					end_ = vector.create(nameEndLine, nameEndColumn),
+				}
 				local args: { Syntax.AstExpr } = {}
-				local argsLocation = snapshot()
+				local argsLocation = nameLoc
 				local hasArgs = false
-				local openParenPosition = { line = 0, column = 0 }
-				local closeParenPosition = { line = 0, column = 0 }
-				const argsCommaPositions: { Syntax.Position } = {}
+				local openParenLine, openParenColumn = 0, 0
+				local closeParenLine, closeParenColumn = 0, 0
+				const argsCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 
 				if token_type == 278 or token_type == 279 or token_type == 123 or token_type == 40 then
 					const argOpenType = token_type
 					if argOpenType == 40 then
-						openParenPosition = { line = token_start_line, column = token_start_col }
+						openParenLine, openParenColumn = token_start_line, token_start_col
 					end
 
 					const args_, argsLoc_, _, parsedCloseParenPosition =
-						parseCallListImpl(storeCstData and argsCommaPositions or nil)
+						parseCallListImpl(argsCommaPositions)
 					args = args_
 					argsLocation = argsLoc_
 					hasArgs = true
 					if argOpenType == 40 and parsedCloseParenPosition then
-						closeParenPosition = parsedCloseParenPosition
+						closeParenLine = parsedCloseParenPosition.x
+						closeParenColumn = parsedCloseParenPosition.y
 					end
 
 					for _, arg in args do
@@ -3708,9 +3829,9 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 					attr.cstNode = if hasArgs
 						then {
 							kind = "CstParametrizedAttr",
-							openParenPosition = openParenPosition,
-							closeParenPosition = closeParenPosition,
-							argsCommaPositions = argsCommaPositions,
+							openParenPosition = vector.create(openParenLine, openParenColumn),
+							closeParenPosition = vector.create(closeParenLine, closeParenColumn),
+							argsCommaPositions = argsCommaPositions :: { Syntax.Position },
 						}
 						else {
 							kind = "CstAttr",
@@ -3721,8 +3842,8 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 				table.insert(attributes, attr)
 
 				if token_type == 44 then
-					if storeCstData then
-						table.insert(commaPositions, { line = token_start_line, column = token_start_col })
+					if commaPositions then
+						table.insert(commaPositions, vector.create(token_start_line, token_start_col))
 					end
 					nextLexeme()
 				else
@@ -3731,8 +3852,8 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 			end
 		else
 			const errorLocation = {
-				begin = { line = open_start_line, column = open_start_col },
-				end_ = { line = token_end_line, column = token_end_col },
+				begin = vector.create(open_start_line, open_start_col),
+				end_ = vector.create(token_end_line, token_end_col),
 			}
 
 			report(errorLocation, "Attribute list cannot be empty")
@@ -3741,7 +3862,7 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 				kind = "Attr",
 				location = errorLocation,
 				type = "Unknown",
-				args = {},
+				args = EmptyArray :: { Syntax.AstExpr },
 				name = "%error-id%",
 			} :: Syntax.AstAttr
 
@@ -3755,33 +3876,35 @@ const function parseAttribute(attributes: Syntax.Attrs): (Syntax.Location, Synta
 			table.insert(attributes, attr)
 		end
 
-		const closeBracketPosition = if token_type == 93
-			then { line = token_start_line, column = token_start_col }
-			else { line = 0, column = 0 }
+		const closeBracketLine = if token_type == 93 then token_start_line else 0
+		const closeBracketColumn = if token_type == 93 then token_start_col else 0
 		expectMatchAndConsume(93, open_type, open_start_line, open_start_col)
 
-		return openLocation,
-			{
+		const cstList: Syntax.CstAttrList? = if storeCstData
+			then {
 				kind = "CstAttrList",
 				atBracketPosition = openLocation.begin,
-				closeBracketPosition = closeBracketPosition,
-				commaPositions = commaPositions,
+				closeBracketPosition = vector.create(closeBracketLine, closeBracketColumn),
+				commaPositions = commaPositions :: { Syntax.Position },
 			}
+			else nil
+
+		return openLocation, cstList
 	end
 end
 
 -- attributes ::= {attribute}
-const function parseAttributes(): (Syntax.Attrs, Syntax.Location?, { Syntax.CstAttrList })
+const function parseAttributes(): (Syntax.Attrs, Syntax.Location?, { Syntax.CstAttrList }?)
 	const attributes: Syntax.Attrs = {}
 	local startLocation: Syntax.Location? = nil
-	const cstAttrLists: { Syntax.CstAttrList } = {}
+	const cstAttrLists: { Syntax.CstAttrList }? = if storeCstData then {} else nil
 
 	while token_type == 284 or token_type == 285 do
 		const attributeStart, cstAttrList = parseAttribute(attributes)
 		if startLocation == nil then
 			startLocation = attributeStart
 		end
-		if storeCstData and cstAttrList then
+		if cstAttrLists and cstAttrList then
 			table.insert(cstAttrLists, cstAttrList)
 		end
 	end
@@ -3803,7 +3926,7 @@ end
 const function parseLocalImpl(
 	start: Syntax.Location,
 	keywordPosition: Syntax.Position,
-	attributes: Syntax.Attrs,
+	attributes: Syntax.Attrs?,
 	cstAttrLists: { Syntax.CstAttrList }?,
 	isConst: boolean
 ): Syntax.AstStatLocal | Syntax.AstStatLocalFunction | Syntax.AstStatError
@@ -3812,27 +3935,39 @@ const function parseLocalImpl(
 	end
 
 	if token_type == 299 then
-		const matchFunction = get_lexeme()
+		const matchFunctionType = token_type
+		const matchFunctionLine = token_start_line
+		local matchFunctionColumn = token_start_col
+		const matchFunctionEndLine, matchFunctionEndColumn = token_end_line, token_end_col
 		nextLexeme()
 
-		const functionKeywordPosition = matchFunction.location.begin
 		-- matchFunction is only used for diagnostics; to make it suitable for detecting missed indentation between
 		-- `local function` and `end`, we patch the token to begin at the column where `local` starts
-		if matchFunction.location.begin.line == start.begin.line then
-			matchFunction.location.begin.column = start.begin.column
+		if matchFunctionLine == start.begin.x then
+			matchFunctionColumn = start.begin.y
 		end
 
-		const name = parseNameImpl("variable name")
+		local name, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+			parseNameScalars("variable name")
+		name = name or "%error-id%"
+		const nameLocation = {
+			begin = vector.create(nameStartLine, nameStartColumn),
+			end_ = vector.create(nameEndLine, nameEndColumn),
+		}
 
 		matchRecovery[296] += 1
 
 		const body, var = parseFunctionBodyImpl(
 			false,
-			matchFunction,
-			name.name.value,
-			name.name.value,
-			name.location,
-			attributes,
+			matchFunctionType,
+			matchFunctionLine,
+			matchFunctionColumn,
+			matchFunctionEndLine,
+			matchFunctionEndColumn,
+			name,
+			name,
+			nameLocation,
+			attributes or (EmptyArray :: Syntax.Attrs),
 			nil,
 			isConst
 		)
@@ -3853,13 +3988,13 @@ const function parseLocalImpl(
 				kind = "CstStatLocalFunction",
 				attrLists = cstAttrLists or {},
 				localKeywordPosition = keywordPosition,
-				functionKeywordPosition = functionKeywordPosition,
+				functionKeywordPosition = vector.create(matchFunctionLine, matchFunctionColumn),
 			}
 		end
 
 		return node
 	else
-		if #attributes ~= 0 then
+		if attributes and #attributes ~= 0 then
 			return reportStatError(
 				snapshot(),
 				{},
@@ -3872,24 +4007,20 @@ const function parseLocalImpl(
 		matchRecovery[61] += 1
 
 		const names: { Syntax.Binding } = {}
-		const varsCommaPositions: { Syntax.Position } = {}
-		if storeCstData then
-			parseBindingList(names, false, varsCommaPositions, nil, nil, isConst)
-		else
-			parseBindingList(names, false, nil, nil, nil, isConst)
-		end
+		const varsCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
+		parseBindingList(names, false, varsCommaPositions, nil, nil, isConst)
 
 		matchRecovery[61] -= 1
 
 		const vars: { Syntax.AstLocal } = {}
 		const values: { Syntax.AstExpr } = {}
-		const valuesCommaPositions: { Syntax.Position } = {}
+		const valuesCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 		local equalsSignLocation: Syntax.Location? = nil
 
 		if token_type == 61 then
 			equalsSignLocation = snapshot()
 			nextLexeme()
-			parseExprListImpl(values, storeCstData and valuesCommaPositions or nil)
+			parseExprListImpl(values, valuesCommaPositions)
 		end
 
 		for _, binding in names do
@@ -3898,7 +4029,7 @@ const function parseLocalImpl(
 
 		local end_
 		if #values == 0 then
-			end_ = { line = prev_end_line, column = prev_end_col }
+			end_ = vector.create(prev_end_line, prev_end_col)
 		else
 			end_ = values[#values].location.end_
 		end
@@ -3917,7 +4048,7 @@ const function parseLocalImpl(
 			isExported = false,
 		} :: Syntax.AstStatLocal
 
-		if storeCstData then
+		if varsCommaPositions and valuesCommaPositions then
 			node.cstNode = {
 				kind = "CstStatLocal",
 				varsAnnotationColonPositions = extractAnnotationColonPositions(names),
@@ -3935,6 +4066,9 @@ const function checkDuplicateExport(name: string, location: Syntax.Location): bo
 		return false
 	end
 
+	if declaredExportBindings == EmptyArray then
+		declaredExportBindings = {}
+	end
 	declaredExportBindings[name] = location
 	return true
 end
@@ -4023,13 +4157,34 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 				)
 			end
 		elseif token_type == 299 then
-			const matchFunction = get_lexeme()
+			const matchFunctionType = token_type
+			const matchFunctionLine, matchFunctionColumn = token_start_line, token_start_col
+			const matchFunctionEndLine, matchFunctionEndColumn = token_end_line, token_end_col
 			nextLexeme()
 
-			const methodName = parseNameImpl("method name")
+			local methodName, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+				parseNameScalars("method name")
+			methodName = methodName or "%error-id%"
+			const methodNameLocation = {
+				begin = vector.create(nameStartLine, nameStartColumn),
+				end_ = vector.create(nameEndLine, nameEndColumn),
+			}
 
 			matchRecovery[296] += 1
-			const body = parseFunctionBodyImpl(false, matchFunction, methodName.name.value, nil, nil, {}, nil, false)
+			const body = parseFunctionBodyImpl(
+				false,
+				matchFunctionType,
+				matchFunctionLine,
+				matchFunctionColumn,
+				matchFunctionEndLine,
+				matchFunctionEndColumn,
+				methodName,
+				nil,
+				nil,
+				EmptyArray :: Syntax.Attrs,
+				nil,
+				false
+			)
 			matchRecovery[296] -= 1
 
 			const selfAnnotation = if #body.args > 0 and body.args[1].name == "self" then body.args[1].annotation else nil
@@ -4037,30 +4192,33 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 				report(selfAnnotation.location, "The 'self' parameter cannot have a type annotation")
 			end
 
-			if string.sub(methodName.name.value, 1, 2) == "__" then
-				if DisallowedClassMetamethods[methodName.name.value] then
-					report(methodName.location, "Classes cannot define '%s' as a metamethod", methodName.name.value)
-				elseif not AllowedClassMetamethods[methodName.name.value] then
+			if string.sub(methodName, 1, 2) == "__" then
+				if DisallowedClassMetamethods[methodName] then
+					report(methodNameLocation, "Classes cannot define '%s' as a metamethod", methodName)
+				elseif not AllowedClassMetamethods[methodName] then
 					report(
-						methodName.location,
+						methodNameLocation,
 						"Cannot use '%s' as a method name: names starting with '__' are reserved",
-						methodName.name.value
+						methodName
 					)
 				end
 			end
 
-			if memberNames[methodName.name.value] then
-				report(methodName.location, "Duplicate class member '%s'", methodName.name.value)
+			if memberNames[methodName] then
+				report(methodNameLocation, "Duplicate class member '%s'", methodName)
 			else
-				memberNames[methodName.name.value] = true
+				memberNames[methodName] = true
 				table.insert(
 					members,
 					{
 						kind = "ClassMethod",
 						qualifierLocation = qualifierLocation,
-						keywordLocation = matchFunction.location,
-						functionName = methodName.name,
-						nameLocation = methodName.location,
+						keywordLocation = {
+							begin = vector.create(matchFunctionLine, matchFunctionColumn),
+							end_ = vector.create(matchFunctionEndLine, matchFunctionEndColumn),
+						},
+						functionName = { value = methodName },
+						nameLocation = methodNameLocation,
 						func = body,
 					} :: Syntax.AstClassMethod
 				)
@@ -4071,12 +4229,15 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 		end
 	end
 
-	const endLocation = snapshot()
+	const endLine, endColumn = token_end_line, token_end_col
 	expectAndConsume(296, "class")
 
 	const node = {
 		kind = "StatClass",
-		location = { begin = start.begin, end_ = endLocation.end_ },
+		location = {
+			begin = start.begin,
+			end_ = vector.create(endLine, endColumn),
+		},
 		name = nameLocal,
 		members = members,
 		exported = exported,
@@ -4097,6 +4258,9 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 		)
 	end
 
+	if classesWithinModule == EmptyArray then
+		classesWithinModule = {}
+	end
 	classesWithinModule[nameLocal.name] = true
 	return node
 end
@@ -4128,10 +4292,10 @@ const function parseExportValueImpl(
 
 		if next_type == 299 then
 			report(start, "'export' must be followed by an identifier or 'function'; try removing 'local'")
-			return parseLocalImpl(start, localKeywordLocation.begin, {}, nil, true)
+			return parseLocalImpl(start, localKeywordLocation.begin, nil, nil, true)
 		end
 
-		return exportLocalStat(parseLocalImpl(start, keywordPosition, {}, nil, false), localKeywordLocation)
+		return exportLocalStat(parseLocalImpl(start, keywordPosition, nil, nil, false), localKeywordLocation)
 	elseif token_type == 299 then
 		const stat = parseLocalImpl(start, keywordPosition, attributes, cstAttrLists, true)
 
@@ -4151,10 +4315,10 @@ const function parseExportValueImpl(
 
 		if token_type == 299 then
 			report(start, "'export' must be followed by an identifier or 'function'")
-			return parseLocalImpl(start, constKeywordLocation.begin, {}, nil, true)
+			return parseLocalImpl(start, constKeywordLocation.begin, nil, nil, true)
 		end
 
-		return exportLocalStat(parseLocalImpl(start, constKeywordLocation.begin, {}, nil, true), constKeywordLocation)
+		return exportLocalStat(parseLocalImpl(start, constKeywordLocation.begin, nil, nil, true), constKeywordLocation)
 	elseif DebugLuauUserDefinedClasses and token_type == 281 and token_string == "class" then
 		nextLexeme()
 		const stat = parseClassStatImpl(start, true)
@@ -4176,7 +4340,7 @@ end
 -- prefixexp -> NAME | '(' expr ')'
 const function parsePrefixExprImpl(): Syntax.AstExpr
 	if token_type == 40 then
-		const start = { line = token_start_line, column = token_start_col }
+		const start = vector.create(token_start_line, token_start_col)
 		const Paren_type = token_type
 		const Paren_line = token_start_line
 		const Paren_col = token_start_col
@@ -4184,8 +4348,8 @@ const function parsePrefixExprImpl(): Syntax.AstExpr
 
 		const expr = ParserFunctions.parseExpr()
 
-		local end_ = { line = token_end_line, column = token_end_col }
-		local closePosition = { line = 0, column = 0 }
+		local end_ = vector.create(token_end_line, token_end_col)
+		local closeLine, closeColumn = 0, 0
 		if token_type ~= 41 then
 			expectMatchAndConsumeFail(
 
@@ -4196,9 +4360,9 @@ const function parsePrefixExprImpl(): Syntax.AstExpr
 				token_type == 61 and "; did you mean to use '{' when defining a table?" or nil
 			)
 
-			end_ = { line = prev_end_line, column = prev_end_col }
+			end_ = vector.create(prev_end_line, prev_end_col)
 		else
-			closePosition = { line = token_start_line, column = token_start_col }
+			closeLine, closeColumn = token_start_line, token_start_col
 			nextLexeme()
 		end
 
@@ -4214,7 +4378,7 @@ const function parsePrefixExprImpl(): Syntax.AstExpr
 		if storeCstData then
 			node.cstNode = {
 				kind = "CstExprGroup",
-				closePosition = closePosition,
+				closePosition = vector.create(closeLine, closeColumn),
 			}
 		end
 
@@ -4224,26 +4388,22 @@ const function parsePrefixExprImpl(): Syntax.AstExpr
 	end
 end
 
-const function parseIndexNameImpl(context: string?, prev: Syntax.Position): Syntax.Binding
-	const nameOpt = parseNameOptImpl(context)
-	if nameOpt then
-		return nameOpt
+const function parseIndexNameScalars(context: string?, prev: Syntax.Position): (string?, number, number, number, number)
+	if token_type == 281 then
+		return parseNameScalars(context)
 	end
 
-	if token_type >= 291 and token_type < 312 and prev and token_start_line == prev.line then
-		const result = {
-			name = { value = token_string },
-			location = snapshot(),
-		} :: Syntax.Binding
+	reportNameError(context)
 
+	if token_type >= 291 and token_type < 312 and token_start_line == prev.x then
+		const name = token_string
+		const startLine, startColumn = token_start_line, token_start_col
+		const endLine, endColumn = token_end_line, token_end_col
 		nextLexeme()
-		return result
+		return name, startLine, startColumn, endLine, endColumn
 	end
 
-	return {
-		name = { value = "%error-id%" },
-		location = snapshot(),
-	}
+	return "%error-id%", token_start_line, token_start_col, token_end_line, token_end_col
 end
 
 const function parseTypeParamsImpl(
@@ -4254,9 +4414,10 @@ const function parseTypeParamsImpl(
 	const params = {} :: { Syntax.AstTypeOrPack }
 
 	if token_type == 60 then
-		const begin = get_lexeme()
+		const beginType = token_type
+		const beginLine, beginColumn = token_start_line, token_start_col
 		if openingPosRef then
-			openingPosRef[1] = begin.location.begin
+			openingPosRef[1] = vector.create(beginLine, beginColumn)
 		end
 
 		nextLexeme()
@@ -4266,7 +4427,7 @@ const function parseTypeParamsImpl(
 				const pack = parseTypePackImpl()
 				table.insert(params, { typePack = pack, type = nil })
 			elseif token_type == 40 then
-				const beginParen = snapshot()
+				const beginParenLine, beginParenColumn = token_start_line, token_start_col
 				local type_: Syntax.AstType? = nil
 				local typePack: Syntax.AstTypePack? = nil
 				const t = token_type
@@ -4317,13 +4478,19 @@ const function parseTypeParamsImpl(
 							}
 						end
 
-						table.insert(params, { type = parseTypeSuffixImpl(node, beginParen), typePack = nil })
+						table.insert(
+							params,
+							{ type = parseTypeSuffixImpl(node, beginParenLine, beginParenColumn), typePack = nil }
+						)
 					else
 						-- Otherwise, it's a type pack.
 						table.insert(params, { type = nil, typePack = typePack })
 					end
 				else
-					table.insert(params, { type = parseTypeSuffixImpl(type_, beginParen), typePack = nil })
+					table.insert(
+						params,
+						{ type = parseTypeSuffixImpl(type_, beginParenLine, beginParenColumn), typePack = nil }
+					)
 				end
 			elseif token_type == 62 and #params == 0 then
 				break
@@ -4333,7 +4500,7 @@ const function parseTypeParamsImpl(
 
 			if token_type == 44 then
 				if commaPosRef then
-					table.insert(commaPosRef, { line = token_start_line, column = token_start_col })
+					table.insert(commaPosRef, vector.create(token_start_line, token_start_col))
 				end
 				nextLexeme()
 			else
@@ -4341,8 +4508,8 @@ const function parseTypeParamsImpl(
 			end
 		end
 
-		if expectMatchAndConsume(62, begin.type, begin.location.begin.line, begin.location.begin.column, false) and closingPosRef then
-			closingPosRef[1] = { line = prev_start_line, column = prev_start_col }
+		if expectMatchAndConsume(62, beginType, beginLine, beginColumn, false) and closingPosRef then
+			closingPosRef[1] = vector.create(prev_start_line, prev_start_col)
 		end
 	end
 	return params
@@ -4350,31 +4517,43 @@ end
 
 -- // Explicit Type Instantiation
 
-const function parseTypeInstantiationExpr(): ({ Syntax.AstTypeOrPack }, Syntax.CstTypeInstantiation, Syntax.Location)
+const function parseTypeInstantiationExpr(): ({ Syntax.AstTypeOrPack }, Syntax.CstTypeInstantiation?, Syntax.Position)
 	const begin_type, begin_line, begin_col = token_type, token_start_line, token_start_col
-	const leftArrow1 = { line = token_start_line, column = token_start_col }
+	const leftArrow1 = if storeCstData then vector.create(token_start_line, token_start_col) else nil
 	nextLexeme()
 
-	const leftArrow2Ref: { Syntax.Position } = {}
-	const commaPositions: { Syntax.Position } = {}
-	const rightArrow1Ref: { Syntax.Position } = {}
+	const leftArrow2Ref: { Syntax.Position }? = if storeCstData then {} else nil
+	const commaPositions: { Syntax.Position }? = if storeCstData then {} else nil
+	const rightArrow1Ref: { Syntax.Position }? = if storeCstData then {} else nil
 
 	const typesOrPacks = parseTypeParamsImpl(leftArrow2Ref, commaPositions, rightArrow1Ref)
 
-	const endLocation = snapshot()
-	const rightArrow2 = if token_type == 62 then endLocation.begin else { line = 0, column = 0 }
+	const endStartLine, endStartColumn = token_start_line, token_start_col
+	const endPosition = vector.create(token_end_line, token_end_col)
+	const rightArrow2 = if storeCstData
+		then if token_type == 62
+			then vector.create(endStartLine, endStartColumn)
+			else vector.create(0, 0)
+		else nil
 	expectMatchAndConsume(62, begin_type, begin_line, begin_col)
 
-	const cstData = {
-		kind = "CstTypeInstantiation",
-		leftArrow1Position = leftArrow1,
-		leftArrow2Position = leftArrow2Ref[1],
-		commaPositions = commaPositions,
-		rightArrow1Position = rightArrow1Ref[1],
-		rightArrow2Position = rightArrow2,
-	} :: Syntax.CstTypeInstantiation
+	local cstData: Syntax.CstTypeInstantiation? = nil
+	if leftArrow1 and leftArrow2Ref and commaPositions and rightArrow1Ref and rightArrow2 then
+		cstData = {
+			kind = "CstTypeInstantiation",
+			leftArrow1Position = leftArrow1,
+			leftArrow2Position = leftArrow2Ref[1],
+			commaPositions = commaPositions,
+			rightArrow1Position = rightArrow1Ref[1],
+			rightArrow2Position = rightArrow2,
+		}
+	end
 
-	return typesOrPacks, cstData, endLocation
+	if cstData then
+		return typesOrPacks, cstData :: Syntax.CstTypeInstantiation, endPosition
+	end
+
+	return typesOrPacks, nil, endPosition
 end
 
 const function reportAmbiguousCallError()
@@ -4385,13 +4564,13 @@ const function reportAmbiguousCallError()
 end
 
 const function reportFunctionArgsErrorImpl(func: Syntax.AstExpr, selfCall: boolean): Syntax.AstExpr
-	if selfCall and token_start_line ~= func.location.end_.line then
+	if selfCall and token_start_line ~= func.location.end_.x then
 		return reportExprError(func.location :: Syntax.Location, { func }, "Expected function call arguments after '('")
 	else
 		return reportExprError(
 			{
 				begin = func.location.begin,
-				end_ = { line = token_start_line, column = token_start_col },
+				end_ = vector.create(token_start_line, token_start_col),
 			},
 			{ func },
 			"Expected '(', '{' or <string> when parsing function call, got %s",
@@ -4403,40 +4582,44 @@ end
 -- args ::=  `(' [explist] `)' | tableconstructor | String
 const function parseFunctionArgsImpl(func: Syntax.AstExpr, selfCall: boolean): Syntax.AstExpr
 	if token_type == 40 then
-		const argStart = { line = token_end_line, column = token_end_col }
-		if func.location.end_.line ~= token_start_line then
+		const argStart = vector.create(token_end_line, token_end_col)
+		if func.location.end_.x ~= token_start_line then
 			reportAmbiguousCallError()
 		end
 
 		const paren_type, paren_line, paren_col = token_type, token_start_line, token_start_col
 		nextLexeme()
 
-		const args: { Syntax.AstExpr } = {}
-		const commaPositions: { Syntax.Position } = {}
+		local args = EmptyArray :: { Syntax.AstExpr }
+		const commaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 		if token_type ~= 41 then
+			args = {}
 			parseExprListImpl(args, commaPositions)
 		end
 
-		const end_ = snapshot()
-		local closeParen = { line = 0, column = 0 }
+		const endLine, endColumn = token_end_line, token_end_col
+		local closeParen: Syntax.Position? = if storeCstData then vector.create(0, 0) else nil
 		if expectMatchAndConsume(41, paren_type, paren_line, paren_col) then
-			closeParen = { line = prev_start_line, column = prev_start_col }
+			if closeParen then
+				closeParen = vector.create(prev_start_line, prev_start_col)
+			end
 		end
 
+		const endPosition = vector.create(endLine, endColumn)
 		const result = {
 			kind = "ExprCall",
-			location = { begin = func.location.begin, end_ = end_.end_ },
+			location = { begin = func.location.begin, end_ = endPosition },
 			func = func,
 			args = args,
 			self = selfCall,
-			typeArguments = {} :: { Syntax.AstTypeOrPack },
-			argLocation = { begin = argStart, end_ = end_.end_ },
+			typeArguments = EmptyArray :: { Syntax.AstTypeOrPack },
+			argLocation = { begin = argStart, end_ = endPosition },
 		} :: Syntax.AstExprCall
 
-		if storeCstData then
+		if commaPositions and closeParen then
 			result.cstNode = {
 				kind = "CstExprCall",
-				openParens = { line = paren_line, column = paren_col },
+				openParens = vector.create(paren_line, paren_col),
 				closeParens = closeParen,
 				commaPositions = commaPositions,
 				explicitTypes = nil,
@@ -4445,9 +4628,9 @@ const function parseFunctionArgsImpl(func: Syntax.AstExpr, selfCall: boolean): S
 
 		return result
 	elseif token_type == 123 then
-		const argStart = { line = token_end_line, column = token_end_col }
+		const argStart = vector.create(token_end_line, token_end_col)
 		const expr = parseTableConstructorImpl()
-		const argEnd = { line = prev_end_line, column = prev_end_col }
+		const argEnd = vector.create(prev_end_line, prev_end_col)
 
 		const result = {
 			kind = "ExprCall",
@@ -4458,7 +4641,7 @@ const function parseFunctionArgsImpl(func: Syntax.AstExpr, selfCall: boolean): S
 			func = func,
 			args = { expr },
 			self = selfCall,
-			typeArguments = {},
+			typeArguments = EmptyArray :: { Syntax.AstTypeOrPack },
 			argLocation = {
 				begin = argStart,
 				end_ = argEnd,
@@ -4487,7 +4670,7 @@ const function parseFunctionArgsImpl(func: Syntax.AstExpr, selfCall: boolean): S
 			func = func,
 			args = { expr },
 			self = selfCall,
-			typeArguments = {},
+			typeArguments = EmptyArray :: { Syntax.AstTypeOrPack },
 			argLocation = argLocation,
 		} :: Syntax.AstExprCall
 
@@ -4509,16 +4692,16 @@ const function parseExplicitTypeInstantiationExpr(
 	start: Syntax.Position,
 	basedOnExpr: Syntax.AstExpr
 ): Syntax.AstExprInstantiate
-	const typesOrPacks, cstInstantiation, endLocation = parseTypeInstantiationExpr()
+	const typesOrPacks, cstInstantiation, endPosition = parseTypeInstantiationExpr()
 
 	const expr = {
 		kind = "ExprInstantiate",
-		location = { begin = start, end_ = endLocation.end_ },
+		location = { begin = start, end_ = endPosition },
 		expr = basedOnExpr,
 		typeArguments = typesOrPacks,
 	} :: Syntax.AstExprInstantiate
 
-	if storeCstData then
+	if cstInstantiation then
 		expr.cstNode = {
 			kind = "CstExprExplicitTypeInstantiation",
 			instantiation = cstInstantiation,
@@ -4530,43 +4713,46 @@ end
 
 -- primaryexp -> prefixexp { `.' NAME | `[' exp `]' | `:' NAME funcargs | funcargs }
 const function parsePrimaryExprImpl(asStatement: boolean): Syntax.AstExpr
-	const start = { line = token_start_line, column = token_start_col }
 	local expr: Syntax.AstExpr = parsePrefixExprImpl()
 
 	const oldRecursion = recursionCounter
 
 	while true do
 		if token_type == 46 then
-			const opPosition = { line = token_start_line, column = token_start_col }
+			const opPosition = vector.create(token_start_line, token_start_col)
 			nextLexeme()
 
-			const index = parseIndexNameImpl(nil, opPosition)
+			const index, indexStartLine, indexStartColumn, indexEndLine, indexEndColumn =
+				parseIndexNameScalars(nil, opPosition)
+			const indexLocation = {
+				begin = vector.create(indexStartLine, indexStartColumn),
+				end_ = vector.create(indexEndLine, indexEndColumn),
+			}
 
 			expr = {
 				kind = "ExprIndexName",
-				location = { begin = start, end_ = index.location.end_ },
+				location = { begin = expr.location.begin, end_ = indexLocation.end_ },
 				expr = expr,
-				index = index.name.value,
-				indexLocation = index.location,
+				index = index,
+				indexLocation = indexLocation,
 				opPosition = opPosition,
 				op = 46,
 			} :: Syntax.AstExprIndexName
 		elseif token_type == 91 then
 			const bracket_type, bracket_line, bracket_col = token_type, token_start_line, token_start_col
-			const openBracket = { line = token_start_line, column = token_start_col }
 			nextLexeme()
 
 			const index = ParserFunctions.parseExpr()
-			const end_ = { line = token_end_line, column = token_end_col }
-			local closeBracket = { line = 0, column = 0 }
+			const end_ = vector.create(token_end_line, token_end_col)
+			local closeBracketLine, closeBracketColumn = 0, 0
 
 			if expectMatchAndConsume(93, bracket_type, bracket_line, bracket_col) then
-				closeBracket = { line = prev_start_line, column = prev_start_col }
+				closeBracketLine, closeBracketColumn = prev_start_line, prev_start_col
 			end
 
 			expr = {
 				kind = "ExprIndexExpr",
-				location = { begin = start, end_ = end_ },
+				location = { begin = expr.location.begin, end_ = end_ },
 				expr = expr,
 				index = index,
 			} :: Syntax.AstExprIndexExpr
@@ -4574,22 +4760,27 @@ const function parsePrimaryExprImpl(asStatement: boolean): Syntax.AstExpr
 			if storeCstData then
 				expr.cstNode = {
 					kind = "CstExprIndexExpr",
-					openBracketPosition = openBracket,
-					closeBracketPosition = closeBracket,
+					openBracketPosition = vector.create(bracket_line, bracket_col),
+					closeBracketPosition = vector.create(closeBracketLine, closeBracketColumn),
 				}
 			end
 		elseif token_type == 58 then
-			const opPosition = { line = token_start_line, column = token_start_col }
+			const opPosition = vector.create(token_start_line, token_start_col)
 			nextLexeme()
 
-			const index = parseIndexNameImpl("method name", opPosition)
+			const index, indexStartLine, indexStartColumn, indexEndLine, indexEndColumn =
+				parseIndexNameScalars("method name", opPosition)
+			const indexLocation = {
+				begin = vector.create(indexStartLine, indexStartColumn),
+				end_ = vector.create(indexEndLine, indexEndColumn),
+			}
 
 			const func = {
 				kind = "ExprIndexName",
-				location = { begin = start, end_ = index.location.end_ },
+				location = { begin = expr.location.begin, end_ = indexLocation.end_ },
 				expr = expr,
-				index = index.name.value,
-				indexLocation = index.location,
+				index = index,
+				indexLocation = indexLocation,
 				opPosition = opPosition,
 				op = 58,
 			} :: Syntax.AstExprIndexName
@@ -4613,7 +4804,7 @@ const function parsePrimaryExprImpl(asStatement: boolean): Syntax.AstExpr
 			end
 		elseif token_type == 40 then
 			-- This error is handled inside 'parseFunctionArgs' as well, but for better error recovery we need to break out the current loop here
-			if not asStatement and expr.location.end_.line ~= token_start_line then
+			if not asStatement and expr.location.end_.x ~= token_start_line then
 				reportAmbiguousCallError()
 				break
 			end
@@ -4621,7 +4812,7 @@ const function parsePrimaryExprImpl(asStatement: boolean): Syntax.AstExpr
 		elseif token_type == 123 or token_type == 278 or token_type == 279 then
 			expr = parseFunctionArgsImpl(expr, false)
 		elseif token_type == 60 and next_type == 60 then
-			expr = parseExplicitTypeInstantiationExpr(start, expr)
+			expr = parseExplicitTypeInstantiationExpr(expr.location.begin, expr)
 		else
 			break
 		end
@@ -4638,19 +4829,26 @@ const function emptyReturnTypePack(location: Syntax.Location): Syntax.AstTypePac
 	return {
 		kind = "TypePackExplicit",
 		location = location,
-		types = {},
+		types = EmptyArray :: { Syntax.AstType },
 		tailType = nil,
 	} :: Syntax.AstTypePackExplicit
 end
 
 const function parseDeclaredExternTypeMethodImpl(attributes: Syntax.Attrs): Syntax.AstDeclaredExternTypeProperty
-	const start = snapshot()
-	local matchParen = get_lexeme()
+	const startLine, startColumn = token_start_line, token_start_col
+	const startEndLine, startEndColumn = token_end_line, token_end_col
 	nextLexeme()
 
-	const fnName = parseNameImpl("function name")
+	local fnName, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+		parseNameScalars("function name")
+	fnName = fnName or "%error-id%"
+	const fnNameLocation = {
+		begin = vector.create(nameStartLine, nameStartColumn),
+		end_ = vector.create(nameEndLine, nameEndColumn),
+	}
 
-	matchParen = get_lexeme()
+	const matchParenType = token_type
+	const matchParenLine, matchParenColumn = token_start_line, token_start_col
 	expectAndConsume(40, "function parameter list start")
 
 	const args = {} :: { Syntax.Binding }
@@ -4661,21 +4859,23 @@ const function parseDeclaredExternTypeMethodImpl(attributes: Syntax.Attrs): Synt
 		vararg, _, varargAnnotation = parseBindingList(args, true)
 	end
 
-	expectMatchAndConsume(41, matchParen.type, matchParen.location.begin.line, matchParen.location.begin.column)
+	expectMatchAndConsume(41, matchParenType, matchParenLine, matchParenColumn)
 
 	local retTypes = parseOptionalReturnTypeImpl(nil)
 	if not retTypes then
 		retTypes = emptyReturnTypePack(snapshot())
 	end
 
-	const endLocation = getprev()
-	const methodLocation = { begin = start.begin, end_ = endLocation.end_ }
+	const methodLocation = {
+		begin = vector.create(startLine, startColumn),
+		end_ = vector.create(prev_end_line, prev_end_col),
+	}
 
 	if #args == 0 or args[1].name.value ~= "self" or args[1].annotation ~= nil then
 		return {
 			kind = "DeclaredExternTypeProperty",
-			name = fnName.name,
-			nameLocation = fnName.location,
+			name = { value = fnName },
+			nameLocation = fnNameLocation,
 			type = reportTypeError(methodLocation, {}, "'self' must be present as the unannotated first parameter"),
 			isMethod = true,
 			location = methodLocation,
@@ -4701,15 +4901,21 @@ const function parseDeclaredExternTypeMethodImpl(attributes: Syntax.Attrs): Synt
 	end
 
 	if vararg and not varargAnnotation then
-		report(start, "All declaration parameters aside from 'self' must be annotated")
+		report(
+			{
+				begin = vector.create(startLine, startColumn),
+				end_ = vector.create(startEndLine, startEndColumn),
+			},
+			"All declaration parameters aside from 'self' must be annotated"
+		)
 	end
 
 	const fnType = {
 		kind = "TypeFunction",
 		location = methodLocation,
 		attributes = attributes,
-		generics = {} :: { Syntax.AstGenericType },
-		genericPacks = {} :: { Syntax.AstGenericTypePack },
+		generics = EmptyArray :: { Syntax.AstGenericType },
+		genericPacks = EmptyArray :: { Syntax.AstGenericTypePack },
 		argTypes = {
 			types = params,
 			tailType = varargAnnotation,
@@ -4720,8 +4926,8 @@ const function parseDeclaredExternTypeMethodImpl(attributes: Syntax.Attrs): Synt
 
 	return {
 		kind = "DeclaredExternTypeProperty",
-		name = fnName.name,
-		nameLocation = fnName.location,
+		name = { value = fnName },
+		nameLocation = fnNameLocation,
 		type = fnType,
 		isMethod = true,
 		location = methodLocation,
@@ -4733,31 +4939,29 @@ end
 const function parseTableIndexerImpl(
 	access: Syntax.AstTableAccess,
 	accessLoc: Syntax.Location?,
-	begin: Syntax.Lexeme
-): {
-	node: Syntax.AstTableIndexer,
-	indexerOpenPosition: Syntax.Position,
-	indexerClosePosition: Syntax.Position,
-	colonPosition: Syntax.Position,
-}
+	beginType: number,
+	beginLine: number,
+	beginColumn: number
+): (Syntax.AstTableIndexer, number, number, number, number)
 	const index = parseTypeImpl(false)
 
-	local indexerClosePos = { line = 0, column = 0 }
-	if expectMatchAndConsume(93, begin.type, begin.location.begin.line, begin.location.begin.column) then
-		indexerClosePos = { line = prev_start_line, column = prev_start_col }
+	local indexerCloseLine, indexerCloseColumn = 0, 0
+	if expectMatchAndConsume(93, beginType, beginLine, beginColumn) then
+		indexerCloseLine, indexerCloseColumn = prev_start_line, prev_start_col
 	end
 
-	local colonPos = { line = 0, column = 0 }
+	local colonLine, colonColumn = 0, 0
 	if expectAndConsume(58, "table field") then
-		colonPos = { line = prev_start_line, column = prev_start_col }
+		colonLine, colonColumn = prev_start_line, prev_start_col
 	end
 
 	const result = parseTypeImpl(false)
+	const beginPosition = vector.create(beginLine, beginColumn)
 
 	const node = {
 		kind = "TableIndexer",
 		location = {
-			begin = begin.location.begin,
+			begin = beginPosition,
 			end_ = result.location.end_,
 		},
 		indexType = index,
@@ -4766,12 +4970,7 @@ const function parseTableIndexerImpl(
 		accessLocation = accessLoc,
 	} :: Syntax.AstTableIndexer
 
-	return {
-		node = node,
-		indexerOpenPosition = begin.location.begin,
-		indexerClosePosition = indexerClosePos,
-		colonPosition = colonPos,
-	}
+	return node, indexerCloseLine, indexerCloseColumn, colonLine, colonColumn
 end
 
 const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.Attrs): Syntax.AstStat
@@ -4788,10 +4987,17 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 	if token_type == 299 then
 		nextLexeme()
 
-		const globalName = parseNameImpl("global function name")
+		local globalName, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+			parseNameScalars("global function name")
+		globalName = globalName or "%error-id%"
+		const globalNameLocation = {
+			begin = vector.create(nameStartLine, nameStartColumn),
+			end_ = vector.create(nameEndLine, nameEndColumn),
+		}
 		const generics, genericPacks = parseGenericTypeListImpl(false)
 
-		const matchParen = get_lexeme()
+		const matchParenType = token_type
+		const matchParenLine, matchParenColumn = token_start_line, token_start_col
 		expectAndConsume(40, "global function declaration")
 
 		const args = {} :: { Syntax.Binding }
@@ -4803,17 +5009,24 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 			vararg, varargLocation, varargAnnotation = parseBindingList(args, true)
 		end
 
-		expectMatchAndConsume(41, matchParen.type, matchParen.location.begin.line, matchParen.location.begin.column)
+		expectMatchAndConsume(41, matchParenType, matchParenLine, matchParenColumn)
 
 		local retTypes = parseOptionalReturnTypeImpl(nil)
-		const endLocation = snapshot()
+		const endStartLine, endStartColumn = token_start_line, token_start_col
+		const endLine, endColumn = token_end_line, token_end_col
 		if not retTypes then
-			retTypes = emptyReturnTypePack(snapshot())
+			retTypes = emptyReturnTypePack({
+				begin = vector.create(endStartLine, endStartColumn),
+				end_ = vector.create(endLine, endColumn),
+			})
 		end
 
 		const params = {} :: { Syntax.AstType }
 		const paramNames = {} :: { Syntax.AstArgumentName }
-		const declLocation = { begin = start.begin, end_ = endLocation.end_ }
+		const declLocation = {
+			begin = start.begin,
+			end_ = vector.create(endLine, endColumn),
+		}
 
 		for _, arg in args do
 			if not arg.annotation then
@@ -4832,8 +5045,8 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 			kind = "StatDeclareFunction",
 			location = declLocation,
 			attributes = attributes,
-			name = globalName.name.value,
-			nameLocation = globalName.location,
+			name = globalName,
+			nameLocation = globalNameLocation,
 			generics = generics,
 			genericPacks = genericPacks,
 			params = {
@@ -4881,13 +5094,15 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 
 		nextLexeme()
 
-		const typeStart = snapshot()
-		const typeName = parseNameImpl("type name")
+		const typeStartLine, typeStartColumn = token_start_line, token_start_col
+		local typeName = parseNameScalars("type name")
+		typeName = typeName or "%error-id%"
 		local superName = nil :: string?
 
 		if token_type == 281 and token_string == "extends" then
 			nextLexeme()
-			superName = parseNameImpl("supertype name").name.value
+			superName = parseNameScalars("supertype name")
+			superName = superName or "%error-id%"
 		end
 
 		if LuauDisallowExternClassInTypeDefinitions or foundExtern then
@@ -4925,15 +5140,21 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 			if token_type == 299 then
 				table.insert(props, parseDeclaredExternTypeMethodImpl(methodAttributes))
 			elseif token_type == 91 then
-				const begin = get_lexeme()
+				const beginType = token_type
+				const beginLine, beginColumn = token_start_line, token_start_col
+				const beginEndLine, beginEndColumn = token_end_line, token_end_col
 				nextLexeme()
 
 				if (token_type == 278 or token_type == 279) and next_type == 93 then
+					const beginLocation = {
+						begin = vector.create(beginLine, beginColumn),
+						end_ = vector.create(beginEndLine, beginEndColumn),
+					}
 					const nameLocation = snapshot()
 					const chars = parseCharArrayImpl()
 					const nameEnd = getprev()
 
-					expectMatchAndConsume(93, begin.type, begin.location.begin.line, begin.location.begin.column)
+					expectMatchAndConsume(93, beginType, beginLine, beginColumn)
 					expectAndConsume(58, "property type annotation")
 					const propType = parseTypeImpl(true)
 
@@ -4946,18 +5167,18 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 								nameLocation = { begin = nameLocation.begin, end_ = nameEnd.end_ },
 								type = propType,
 								isMethod = false,
-								location = { begin = begin.location.begin, end_ = propType.location.end_ },
+								location = { begin = beginLocation.begin, end_ = propType.location.end_ },
 								access = "ReadWrite",
 							} :: Syntax.AstDeclaredExternTypeProperty
 						)
 					else
-						report(begin.location, "String literal contains malformed escape sequence or \\0")
+						report(beginLocation, "String literal contains malformed escape sequence or \\0")
 					end
 				elseif indexer then
-					const badIndexer = parseTableIndexerImpl("ReadWrite", nil, begin)
-					report(badIndexer.node.location, "Cannot have more than one indexer on an extern type")
+					const badIndexer = parseTableIndexerImpl("ReadWrite", nil, beginType, beginLine, beginColumn)
+					report(badIndexer.location, "Cannot have more than one indexer on an extern type")
 				else
-					indexer = parseTableIndexerImpl("ReadWrite", nil, begin).node
+					indexer = parseTableIndexerImpl("ReadWrite", nil, beginType, beginLine, beginColumn)
 				end
 			else
 				local access: Syntax.AstTableAccess = "ReadWrite"
@@ -5010,13 +5231,16 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 			end
 		end
 
-		const typeEnd = snapshot()
+		const typeEndLine, typeEndColumn = token_end_line, token_end_col
 		expectAndConsume(296, "extern type")
 
 		return {
 			kind = "StatDeclareExternType",
-			location = { begin = typeStart.begin, end_ = typeEnd.end_ },
-			name = typeName.name.value,
+			location = {
+				begin = vector.create(typeStartLine, typeStartColumn),
+				end_ = vector.create(typeEndLine, typeEndColumn),
+			},
+			name = typeName,
 			superName = superName,
 			props = props,
 			indexer = indexer,
@@ -5094,7 +5318,8 @@ end
 
 -- return [explist]
 const function parseReturnImpl(): Syntax.AstStatReturn
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
+	const startEndLine, startEndColumn = token_end_line, token_end_col
 	nextLexeme()
 
 	if LuauExportValueSyntax and #functionStack == 1 then
@@ -5110,13 +5335,13 @@ const function parseReturnImpl(): Syntax.AstStatReturn
 	end
 
 	const list: { Syntax.AstExpr } = {}
-	const commaPositions: { Syntax.Position } = {}
+	const commaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 
 	if not BlockFollow[token_type] and token_type ~= 59 then
-		parseExprListImpl(list, storeCstData and commaPositions or nil)
+		parseExprListImpl(list, commaPositions)
 	end
 
-	local end_ = start.end_
+	local end_: Syntax.Position = vector.create(startEndLine, startEndColumn)
 	if #list > 0 then
 		end_ = list[#list].location.end_
 	end
@@ -5124,13 +5349,13 @@ const function parseReturnImpl(): Syntax.AstStatReturn
 	const node = {
 		kind = "StatReturn",
 		location = {
-			begin = start.begin,
+			begin = vector.create(startLine, startColumn),
 			end_ = end_,
 		},
 		list = list,
 	} :: Syntax.AstStatReturn
 
-	if storeCstData then
+	if commaPositions then
 		node.cstNode = {
 			kind = "CstStatReturn",
 			commaPositions = commaPositions,
@@ -5144,9 +5369,12 @@ end
 const function parseTypeFunctionImpl(
 	start: Syntax.Location,
 	exported: boolean,
-	typeKeywordPosition: Syntax.Position
+	typeKeywordLine: number,
+	typeKeywordColumn: number
 ): Syntax.AstStatTypeFunction
-	const matchFn = get_lexeme()
+	const matchFunctionType = token_type
+	const matchFunctionLine, matchFunctionColumn = token_start_line, token_start_col
+	const matchFunctionEndLine, matchFunctionEndColumn = token_end_line, token_end_col
 	nextLexeme()
 
 	const errorsAtStart = #parseErrors
@@ -5167,7 +5395,20 @@ const function parseTypeFunctionImpl(
 	const oldTypeFunctionDepth = typeFunctionDepth
 	typeFunctionDepth = #functionStack
 
-	const body = parseFunctionBodyImpl(false, matchFn, fnName.name.value, nil, nil, {}, nil, false)
+	const body = parseFunctionBodyImpl(
+		false,
+		matchFunctionType,
+		matchFunctionLine,
+		matchFunctionColumn,
+		matchFunctionEndLine,
+		matchFunctionEndColumn,
+		fnName.name.value,
+		nil,
+		nil,
+		{},
+		nil,
+		false
+	)
 
 	typeFunctionDepth = oldTypeFunctionDepth
 	matchRecovery[296] -= 1
@@ -5190,8 +5431,8 @@ const function parseTypeFunctionImpl(
 	if storeCstData then
 		node.cstNode = {
 			kind = "CstStatTypeFunction",
-			typeKeywordPosition = typeKeywordPosition,
-			functionKeywordPosition = matchFn.location.begin,
+			typeKeywordPosition = vector.create(typeKeywordLine, typeKeywordColumn),
+			functionKeywordPosition = vector.create(matchFunctionLine, matchFunctionColumn),
 		}
 	end
 
@@ -5202,11 +5443,12 @@ end
 const function parseTypeAliasImpl(
 	start: Syntax.Location,
 	exported: boolean,
-	typeKeywordPosition: Syntax.Position
+	typeKeywordLine: number,
+	typeKeywordColumn: number
 ): Syntax.AstStatTypeAlias | Syntax.AstStatTypeFunction
 	-- parsing a type function
 	if token_type == 299 then
-		return parseTypeFunctionImpl(start, exported, typeKeywordPosition)
+		return parseTypeFunctionImpl(start, exported, typeKeywordLine, typeKeywordColumn)
 	end
 
 	-- parsing a type alias
@@ -5224,26 +5466,18 @@ const function parseTypeAliasImpl(
 		} :: Syntax.Binding
 	end
 
-	const genericsCommaPos: { Syntax.Position } = {}
+	const genericsCommaPos: { Syntax.Position }? = if storeCstData then {} else nil
+	const genericsClosePos: { Syntax.Position }? = if storeCstData then { vector.create(0, 0) } else nil
+	const genericsOpenPos: { Syntax.Position }? = if storeCstData then { vector.create(0, 0) } else nil
 
-	const genericsClosePos = {
-		{ line = 0, column = 0 },
-	}
+	const generics, genericPacks =
+		parseGenericTypeListImpl(true, genericsOpenPos, genericsCommaPos, genericsClosePos)
 
-	const genericsOpenPos = {
-		{ line = 0, column = 0 },
-	}
-
-	local generics: { Syntax.AstGenericType }, genericPacks: { Syntax.AstGenericTypePack }
-	if storeCstData then
-		generics, genericPacks = parseGenericTypeListImpl(true, genericsOpenPos, genericsCommaPos, genericsClosePos)
-	else
-		generics, genericPacks = parseGenericTypeListImpl(true)
-	end
-
-	local equalsPosition = { line = 0, column = 0 }
+	local equalsPosition: Syntax.Position? = if storeCstData then vector.create(0, 0) else nil
 	if expectAndConsume(61, "type alias") then
-		equalsPosition = { line = prev_start_line, column = prev_start_col }
+		if equalsPosition then
+			equalsPosition = vector.create(prev_start_line, prev_start_col)
+		end
 	end
 
 	const type_ = parseTypeImpl()
@@ -5259,10 +5493,10 @@ const function parseTypeAliasImpl(
 		exported = exported,
 	} :: Syntax.AstStatTypeAlias
 
-	if storeCstData then
+	if genericsOpenPos and genericsCommaPos and genericsClosePos and equalsPosition then
 		node.cstNode = {
 			kind = "CstStatTypeAlias",
-			typeKeywordPosition = typeKeywordPosition,
+			typeKeywordPosition = vector.create(typeKeywordLine, typeKeywordColumn),
 			genericsOpenPosition = genericsOpenPos[1],
 			genericsCommaPositions = genericsCommaPos,
 			genericsClosePosition = genericsClosePos[1],
@@ -5282,11 +5516,11 @@ const function parseAssignmentImpl(initial: Syntax.AstExpr): Syntax.AstStatAssig
 	end
 
 	const vars: { Syntax.AstExpr } = { initial }
-	const varsCommaPositions: { Syntax.Position } = {}
+	const varsCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
 
 	while token_type == 44 do
-		if storeCstData then
-			table.insert(varsCommaPositions, { line = token_start_line, column = token_start_col })
+		if varsCommaPositions then
+			table.insert(varsCommaPositions, vector.create(token_start_line, token_start_col))
 		end
 		nextLexeme()
 
@@ -5299,14 +5533,14 @@ const function parseAssignmentImpl(initial: Syntax.AstExpr): Syntax.AstStatAssig
 		table.insert(vars, expr)
 	end
 
-	local equalsPosition = { line = 0, column = 0 }
+	local equalsLine, equalsColumn = 0, 0
 	if expectAndConsume(61, "assignment") then
-		equalsPosition = { line = prev_start_line, column = prev_start_col }
+		equalsLine, equalsColumn = prev_start_line, prev_start_col
 	end
 
 	const values: { Syntax.AstExpr } = {}
-	const valuesCommaPositions: { Syntax.Position } = {}
-	parseExprListImpl(values, storeCstData and valuesCommaPositions or nil)
+	const valuesCommaPositions: { Syntax.Position }? = if storeCstData then {} else nil
+	parseExprListImpl(values, valuesCommaPositions)
 
 	const end_ = values[#values].location
 
@@ -5317,11 +5551,11 @@ const function parseAssignmentImpl(initial: Syntax.AstExpr): Syntax.AstStatAssig
 		values = values,
 	} :: Syntax.AstStatAssign
 
-	if storeCstData then
+	if varsCommaPositions and valuesCommaPositions then
 		node.cstNode = {
 			kind = "CstStatAssign",
 			varsCommaPositions = varsCommaPositions,
-			equalsPosition = equalsPosition,
+			equalsPosition = vector.create(equalsLine, equalsColumn),
 			valuesCommaPositions = valuesCommaPositions,
 		}
 	end
@@ -5337,7 +5571,7 @@ const function parseCompoundAssignmentImpl(initial: Syntax.AstExpr, op: number):
 			else reportExprError(initial.location, { initial }, "Assigned expression must be a variable or a field")
 	end
 
-	const opPosition = { line = token_start_line, column = token_start_col }
+	const opLine, opColumn = token_start_line, token_start_col
 	nextLexeme()
 
 	const value = ParserFunctions.parseExpr()
@@ -5353,7 +5587,7 @@ const function parseCompoundAssignmentImpl(initial: Syntax.AstExpr, op: number):
 	if storeCstData then
 		node.cstNode = {
 			kind = "CstStatCompoundAssign",
-			opPosition = opPosition,
+			opPosition = vector.create(opLine, opColumn),
 		}
 	end
 
@@ -5390,7 +5624,7 @@ const function parseTypeListImpl(
 			nextLexeme()
 
 			if nameColonPositions then
-				table.insert(nameColonPositions, { line = token_start_line, column = token_start_col })
+				table.insert(nameColonPositions, vector.create(token_start_line, token_start_col))
 			end
 
 			expectAndConsume(58)
@@ -5409,7 +5643,7 @@ const function parseTypeListImpl(
 		end
 
 		if commaPositions then
-			table.insert(commaPositions, { line = token_start_line, column = token_start_col })
+			table.insert(commaPositions, vector.create(token_start_line, token_start_col))
 		end
 		nextLexeme()
 
@@ -5430,11 +5664,12 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 	incrementRecursionCounter("type annotation")
 
 	const props: { Syntax.AstTableProp } = {}
-	const cstItems: { Syntax.CstTypeTableItem } = {}
+	const cstItems: { Syntax.CstTypeTableItem }? = if storeCstData then {} else nil
 	local indexer: Syntax.AstTableIndexer? = nil
 
-	const start = snapshot()
-	const matchBrace = get_lexeme()
+	const startLine, startColumn = token_start_line, token_start_col
+	const matchBraceType = token_type
+	const matchBraceLine, matchBraceColumn = token_start_line, token_start_col
 	expectAndConsume(123, "table type")
 
 	local isArray = false
@@ -5456,17 +5691,23 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 		end
 
 		if token_type == 91 then
-			const begin = get_lexeme()
+			const beginType = token_type
+			const beginLine, beginColumn = token_start_line, token_start_col
+			const beginEndLine, beginEndColumn = token_end_line, token_end_col
 			nextLexeme()
 
 			if (token_type == 278 or token_type == 279) and next_type == 93 then
+				const beginLocation = {
+					begin = vector.create(beginLine, beginColumn),
+					end_ = vector.create(beginEndLine, beginEndColumn),
+				}
 				local style = 0
 				local depth = 0
 				if storeCstData then
 					style, depth = extractStringDetails()
 				end
 
-				const stringPos = { line = token_start_line, column = token_start_col }
+				const stringLine, stringColumn = token_start_line, token_start_col
 				local sourceString: string? = nil
 				if storeCstData then
 					sourceString = token_string
@@ -5474,14 +5715,14 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 
 				const chars = parseCharArrayImpl()
 
-				local indexerClosePos = { line = 0, column = 0 }
-				if expectMatchAndConsume(93, begin.type, begin.location.begin.line, begin.location.begin.column) then
-					indexerClosePos = { line = prev_start_line, column = prev_start_col }
+				local indexerCloseLine, indexerCloseColumn = 0, 0
+				if expectMatchAndConsume(93, beginType, beginLine, beginColumn) then
+					indexerCloseLine, indexerCloseColumn = prev_start_line, prev_start_col
 				end
 
-				local colonPos = { line = 0, column = 0 }
+				local colonLine, colonColumn = 0, 0
 				if expectAndConsume(58, "table field") then
-					colonPos = { line = prev_start_line, column = prev_start_col }
+					colonLine, colonColumn = prev_start_line, prev_start_col
 				end
 
 				const type_ = parseTypeImpl()
@@ -5492,14 +5733,14 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 						{
 							kind = "TableProp",
 							name = { value = chars },
-							location = begin.location,
+							location = beginLocation,
 							type = type_,
 							access = access,
 							accessLocation = accessLoc,
 						} :: Syntax.AstTableProp
 					)
 
-					if storeCstData then
+					if cstItems then
 						const separator = tableSeparator()
 						const cstString = {
 							kind = "CstExprConstantString",
@@ -5512,37 +5753,38 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 							cstItems,
 							{
 								kind = "StringProperty",
-								indexerOpenPosition = begin.location.begin,
-								indexerClosePosition = indexerClosePos,
-								colonPosition = colonPos,
+								indexerOpenPosition = beginLocation.begin,
+								indexerClosePosition = vector.create(indexerCloseLine, indexerCloseColumn),
+								colonPosition = vector.create(colonLine, colonColumn),
 								separator = separator,
 								separatorPosition = cstSeparatorPosition(separator),
 								stringInfo = cstString,
-								stringPosition = stringPos,
+								stringPosition = vector.create(stringLine, stringColumn),
 							} :: Syntax.CstTypeTableItem
 						)
 					end
 				else
-					report(begin.location, "String literal contains malformed escape sequence or \\0")
+					report(beginLocation, "String literal contains malformed escape sequence or \\0")
 				end
 			else
 				if indexer then
-					const badIndexerRes = parseTableIndexerImpl(access, accessLoc, begin)
-					report(badIndexerRes.node.location, "Cannot have more than one table indexer")
+					const badIndexerRes = parseTableIndexerImpl(access, accessLoc, beginType, beginLine, beginColumn)
+					report(badIndexerRes.location, "Cannot have more than one table indexer")
 				else
-					const idxRes = parseTableIndexerImpl(access, accessLoc, begin)
-					indexer = idxRes.node
+					const idxNode, indexerCloseLine, indexerCloseColumn, colonLine, colonColumn =
+						parseTableIndexerImpl(access, accessLoc, beginType, beginLine, beginColumn)
+					indexer = idxNode
 
-					if storeCstData then
+					if cstItems then
 						const separator = tableSeparator()
 						table.insert(
 							cstItems,
 							{
 								kind = "Indexer",
 
-								indexerOpenPosition = idxRes.indexerOpenPosition,
-								indexerClosePosition = idxRes.indexerClosePosition,
-								colonPosition = idxRes.colonPosition,
+								indexerOpenPosition = vector.create(beginLine, beginColumn),
+								indexerClosePosition = vector.create(indexerCloseLine, indexerCloseColumn),
+								colonPosition = vector.create(colonLine, colonColumn),
 								separator = separator,
 								separatorPosition = cstSeparatorPosition(separator),
 							} :: Syntax.CstTypeTableItem
@@ -5561,7 +5803,7 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 				name = "number",
 				nameLocation = type_.location,
 				hasParameterList = false,
-				parameters = {},
+				parameters = EmptyArray :: { Syntax.AstTypeOrPack },
 			} :: Syntax.AstTypeReference
 
 			indexer = {
@@ -5579,9 +5821,9 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 				break
 			end
 
-			local colonPos = { line = 0, column = 0 }
+			local colonLine, colonColumn = 0, 0
 			if expectAndConsume(58, "table field") then
-				colonPos = { line = prev_start_line, column = prev_start_col }
+				colonLine, colonColumn = prev_start_line, prev_start_col
 			end
 
 			const type_ = parseTypeImpl(inDeclarationContext)
@@ -5598,13 +5840,13 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 				} :: Syntax.AstTableProp
 			)
 
-			if storeCstData then
+			if cstItems then
 				const separator = tableSeparator()
 				table.insert(
 					cstItems,
 					{
 						kind = "Property",
-						colonPosition = colonPos,
+						colonPosition = vector.create(colonLine, colonColumn),
 						separator = separator,
 						separatorPosition = cstSeparatorPosition(separator),
 					} :: Syntax.CstTypeTableItem
@@ -5619,27 +5861,30 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 		end
 	end
 
-	local endLoc = snapshot()
+	local endLine, endColumn = token_end_line, token_end_col
 	if
 		not expectMatchAndConsume(
 			125,
-			matchBrace.type,
-			matchBrace.location.begin.line,
-			matchBrace.location.begin.column,
+			matchBraceType,
+			matchBraceLine,
+			matchBraceColumn,
 			true
 		)
 	then
-		endLoc = getprev()
+		endLine, endColumn = prev_end_line, prev_end_col
 	end
 
 	const node = {
 		kind = "TypeTable",
-		location = { begin = start.begin, end_ = endLoc.end_ },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
+		},
 		props = props,
 		indexer = indexer,
 	} :: Syntax.AstTypeTable
 
-	if storeCstData then
+	if cstItems then
 		node.cstNode = {
 			kind = "CstTypeTable",
 			items = cstItems,
@@ -5651,7 +5896,8 @@ const function parseTableTypeImpl(inDeclarationContext: boolean): Syntax.AstType
 end
 
 const function parseFunctionTypeTailImpl(
-	begin: Syntax.Lexeme,
+	beginType: number,
+	beginLocation: Syntax.Location,
 	attributes: Syntax.Attrs,
 	generics: { Syntax.AstGenericType },
 	genericPacks: { Syntax.AstGenericTypePack },
@@ -5669,17 +5915,17 @@ const function parseFunctionTypeTailImpl(
 		-- Users occasionally write '()' as the 'unit' type when they actually want to use 'nil', here we'll try to give a more specific error
 	elseif token_type ~= 263 and #generics == 0 and #genericPacks == 0 and #params == 0 then
 		report({
-			begin = begin.location.begin,
-			end_ = { line = prev_end_line, column = prev_end_col },
+			begin = beginLocation.begin,
+			end_ = vector.create(prev_end_line, prev_end_col),
 		}, "Expected '->' after '()' when parsing function type; did you mean 'nil'?")
 
 		return {
 			kind = "TypeReference",
-			location = begin.location,
+			location = beginLocation,
 			name = "nil",
-			nameLocation = begin.location,
+			nameLocation = beginLocation,
 			hasParameterList = false,
-			parameters = {},
+			parameters = EmptyArray :: { Syntax.AstTypeOrPack },
 		} :: Syntax.AstTypeReference
 	else
 		expectAndConsume(263, "function type")
@@ -5690,7 +5936,7 @@ const function parseFunctionTypeTailImpl(
 	return {
 		kind = "TypeFunction",
 		location = {
-			begin = begin.location.begin,
+			begin = beginLocation.begin,
 			end_ = returnType.location.end_,
 		},
 		attributes = attributes,
@@ -5713,44 +5959,49 @@ allowPack: boolean, attributes: Syntax.Attrs
 	incrementRecursionCounter("type annotation")
 
 	local forceFunctionType = (token_type == 60)
-	const begin = get_lexeme()
+	const beginType = token_type
+	const beginLocation = {
+		begin = vector.create(token_start_line, token_start_col),
+		end_ = vector.create(token_end_line, token_end_col),
+	}
 
-	const openGenPos: { Syntax.Position } = { { line = 0, column = 0 } }
-	const genCommaPos: { Syntax.Position } = {}
-	const closeGenPos: { Syntax.Position } = { { line = 0, column = 0 } }
+	const openGenPos: { Syntax.Position }? = if storeCstData then { vector.create(0, 0) } else nil
+	const genCommaPos: { Syntax.Position }? = if storeCstData then {} else nil
+	const closeGenPos: { Syntax.Position }? = if storeCstData then { vector.create(0, 0) } else nil
 
-	local generics: { Syntax.AstGenericType }, genericPacks: { Syntax.AstGenericTypePack }
-	if storeCstData then
-		generics, genericPacks = parseGenericTypeListImpl(false, openGenPos, genCommaPos, closeGenPos)
-	else
-		generics, genericPacks = parseGenericTypeListImpl(false)
-	end
+	const generics, genericPacks = parseGenericTypeListImpl(false, openGenPos, genCommaPos, closeGenPos)
 
-	const paramStart = get_lexeme()
+	const paramStartType = token_type
+	const paramStartLine, paramStartColumn = token_start_line, token_start_col
 	const openArgsFound = expectAndConsume(40, "function parameters")
-	const openArgsPosition = if openArgsFound then paramStart.location.begin else { line = 0, column = 0 }
+	const openArgsPosition = if storeCstData
+		then if openArgsFound
+			then vector.create(paramStartLine, paramStartColumn)
+			else vector.create(0, 0)
+		else nil
 
 	matchRecovery[263] += 1
 
-	const params: { Syntax.AstType } = {}
-	const names: { Syntax.AstArgumentName | boolean } = {}
-	const argCommaPos: { Syntax.Position } = {}
-	const nameColonPos: { Syntax.Position | boolean } = {}
+	local params = EmptyArray :: { Syntax.AstType }
+	local names = EmptyArray :: { Syntax.AstArgumentName | boolean }
+	const argCommaPos: { Syntax.Position }? = if storeCstData then {} else nil
+	const nameColonPos: { Syntax.Position | boolean }? = if storeCstData then {} else nil
 
 	local varargAnnotation: Syntax.AstTypePack? = nil
 
 	if token_type ~= 41 then
-		if storeCstData then
-			varargAnnotation = parseTypeListImpl(params, names, argCommaPos, nameColonPos)
-		else
-			varargAnnotation = parseTypeListImpl(params, names)
-		end
+		params = {}
+		names = {}
+		varargAnnotation = parseTypeListImpl(params, names, argCommaPos, nameColonPos)
 	end
 
-	const closeArgsLoc = snapshot()
-	local closeArgsPosition = { line = 0, column = 0 }
-	if expectMatchAndConsume(41, paramStart.type, paramStart.location.begin.line, paramStart.location.begin.column, true) then
-		closeArgsPosition = closeArgsLoc.begin
+	const closeArgsStartLine, closeArgsStartColumn = token_start_line, token_start_col
+	const closeArgsEndLine, closeArgsEndColumn = token_end_line, token_end_col
+	local closeArgsPosition: Syntax.Position? = if storeCstData then vector.create(0, 0) else nil
+	if expectMatchAndConsume(41, paramStartType, paramStartLine, paramStartColumn, true) then
+		if closeArgsPosition then
+			closeArgsPosition = vector.create(closeArgsStartLine, closeArgsStartColumn)
+		end
 	end
 
 	matchRecovery[263] -= 1
@@ -5767,11 +6018,11 @@ allowPack: boolean, attributes: Syntax.Attrs
 		if allowPack then
 			const node = {
 				kind = "TypePackExplicit",
-				location = begin.location,
+				location = beginLocation,
 				types = paramTypes,
 			} :: Syntax.AstTypePackExplicit
 
-			if storeCstData then
+			if argCommaPos and openArgsPosition and closeArgsPosition then
 				node.cstNode = {
 					kind = "CstTypePackExplicit",
 					openParenthesesPosition = openArgsPosition,
@@ -5785,13 +6036,13 @@ allowPack: boolean, attributes: Syntax.Attrs
 			const node = {
 				kind = "TypeGroup",
 				location = {
-					begin = paramStart.location.begin,
-					end_ = closeArgsLoc.end_,
+					begin = vector.create(paramStartLine, paramStartColumn),
+					end_ = vector.create(closeArgsEndLine, closeArgsEndColumn),
 				},
 				type = params[1],
 			} :: Syntax.AstTypeGroup
 
-			if storeCstData then
+			if closeArgsPosition then
 				node.cstNode = {
 					kind = "CstTypeGroup",
 					closePosition = closeArgsPosition,
@@ -5805,12 +6056,12 @@ allowPack: boolean, attributes: Syntax.Attrs
 	if not forceFunctionType and not returnTypeIntroducer and allowPack then
 		const node = {
 			kind = "TypePackExplicit",
-			location = begin.location,
+			location = beginLocation,
 			types = paramTypes,
 			tailType = varargAnnotation,
 		} :: Syntax.AstTypePackExplicit
 
-		if storeCstData then
+		if argCommaPos and openArgsPosition and closeArgsPosition then
 			node.cstNode = {
 				kind = "CstTypePackExplicit",
 				openParenthesesPosition = openArgsPosition,
@@ -5822,10 +6073,30 @@ allowPack: boolean, attributes: Syntax.Attrs
 		return nil, node
 	end
 
-	const returnArrowPosition = { line = token_start_line, column = token_start_col }
-	const node = parseFunctionTypeTailImpl(begin, attributes, generics, genericPacks, paramTypes, names, varargAnnotation)
+	const returnArrowPosition =
+		if storeCstData then vector.create(token_start_line, token_start_col) else nil
+	const node = parseFunctionTypeTailImpl(
+		beginType,
+		beginLocation,
+		attributes,
+		generics,
+		genericPacks,
+		paramTypes,
+		names,
+		varargAnnotation
+	)
 
-	if storeCstData and node.kind == "TypeFunction" then
+	if
+		openGenPos
+		and genCommaPos
+		and closeGenPos
+		and nameColonPos
+		and argCommaPos
+		and openArgsPosition
+		and closeArgsPosition
+		and returnArrowPosition
+		and node.kind == "TypeFunction"
+	then
 		node.cstNode = {
 			kind = "CstTypeFunction",
 			openGenericsPosition = openGenPos[1],
@@ -5854,58 +6125,59 @@ const function checkUnaryConfusables(): number?
 end
 
 const function checkBinaryConfusables(limit: number): number?
-	const curr = get_lexeme()
+	const currentType = token_type
 
 	-- arly-out: need to check if this is a possible confusable quickly
-	if curr.type ~= 38 and curr.type ~= 124 and curr.type ~= 33 then
+	if currentType ~= 38 and currentType ~= 124 and currentType ~= 33 then
 		return nil
 	end
 
 	-- slow path: possible confusable
-	const start = curr.location
+	const startLine, startColumn = token_start_line, token_start_col
+	const endLine, endColumn = token_end_line, token_end_col
 
 	if
-		curr.type == 38
+		currentType == 38
 		and next_type == 38
-		and curr.location.end_.line == next_start_line
-		and curr.location.end_.column == next_start_col
+		and endLine == next_start_line
+		and endColumn == next_start_col
 		and BinaryPriority[BinaryOp.And][1] > limit
 	then
 		nextLexeme()
 
 		report({
-			begin = start.begin,
-			end_ = { line = token_end_line, column = token_end_col },
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(token_end_line, token_end_col),
 		}, "Unexpected '&&'; did you mean 'and'?")
 
 		return BinaryOp.And
 	elseif
-		curr.type == 124
+		currentType == 124
 		and next_type == 124
-		and curr.location.end_.line == next_start_line
-		and curr.location.end_.column == next_start_col
+		and endLine == next_start_line
+		and endColumn == next_start_col
 		and BinaryPriority[BinaryOp.Or][1] > limit
 	then
 		nextLexeme()
 
 		report({
-			begin = start.begin,
-			end_ = { line = token_end_line, column = token_end_col },
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(token_end_line, token_end_col),
 		}, "Unexpected '||'; did you mean 'or'?")
 
 		return BinaryOp.Or
 	elseif
-		curr.type == 33
+		currentType == 33
 		and next_type == 61
-		and curr.location.end_.line == next_start_line
-		and curr.location.end_.column == next_start_col
+		and endLine == next_start_line
+		and endColumn == next_start_col
 		and BinaryPriority[BinaryOp.CompareNe][1] > limit
 	then
 		nextLexeme()
 
 		report({
-			begin = start.begin,
-			end_ = { line = token_end_line, column = token_end_col },
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(token_end_line, token_end_col),
 		}, "Unexpected '!='; did you mean '~='?")
 
 		return BinaryOp.CompareNe
@@ -6171,37 +6443,42 @@ end
 
 const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstExprError
 	const strings: { string } = {}
-	const sourceStrings: { string } = {}
-	const stringPositions: { Syntax.Position } = {}
+	const sourceStrings: { string }? = if storeCstData then {} else nil
+	const stringPositions: { Syntax.Position }? = if storeCstData then {} else nil
 	const expressions: { Syntax.AstExpr } = {}
 
-	const startLocation = snapshot()
-	local endLocation: Syntax.Location? = nil
+	const startLine, startColumn = token_start_line, token_start_col
+	local endLine, endColumn = token_end_line, token_end_col
 
 	while true do
-		const currentLexeme = get_lexeme()
-		endLocation = currentLexeme.location
+		const currentType = token_type
+		const currentStartLine, currentStartColumn = token_start_line, token_start_col
+		endLine, endColumn = token_end_line, token_end_col
 
 		const data = token_string or ""
 
-		if storeCstData then
+		if sourceStrings and stringPositions then
 			table.insert(sourceStrings, data)
-			table.insert(stringPositions, currentLexeme.location.begin)
+			table.insert(stringPositions, vector.create(currentStartLine, currentStartColumn))
 		end
 
 		const ok, fixedData = fixupQuotedString(data)
 		if not ok then
 			nextLexeme()
-			return reportExprError({
-				begin = startLocation.begin,
-				end_ = endLocation.end_,
-			}, {}, "Interpolated string literal contains malformed escape sequence")
+			return reportExprError(
+				{
+					begin = vector.create(startLine, startColumn),
+					end_ = vector.create(endLine, endColumn),
+				},
+				{},
+				"Interpolated string literal contains malformed escape sequence"
+			)
 		end
 
 		nextLexeme()
 		table.insert(strings, fixedData :: string)
 
-		if currentLexeme.type == 268 or currentLexeme.type == 269 then
+		if currentType == 268 or currentType == 269 then
 			break
 		end
 
@@ -6213,14 +6490,28 @@ const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstE
 			nextLexeme()
 			table.insert(
 				expressions,
-				reportExprError(endLocation, {}, "Malformed interpolated string, expected expression inside '{}'")
+				reportExprError(
+					{
+						begin = vector.create(currentStartLine, currentStartColumn),
+						end_ = vector.create(endLine, endColumn),
+					},
+					{},
+					"Malformed interpolated string, expected expression inside '{}'"
+				)
 			)
 		elseif t == 286 then
 			errorWhileChecking = true
 			nextLexeme()
 			table.insert(
 				expressions,
-				reportExprError(endLocation, {}, "Malformed interpolated string; did you forget to add a '`'?")
+				reportExprError(
+					{
+						begin = vector.create(currentStartLine, currentStartColumn),
+						end_ = vector.create(endLine, endColumn),
+					},
+					{},
+					"Malformed interpolated string; did you forget to add a '`'?"
+				)
 			)
 		else
 			table.insert(expressions, ParserFunctions.parseExpr())
@@ -6236,7 +6527,10 @@ const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstE
 		elseif token_type == 289 then
 			nextLexeme()
 			return reportExprError(
-				endLocation,
+				{
+					begin = vector.create(currentStartLine, currentStartColumn),
+					end_ = vector.create(endLine, endColumn),
+				},
 				{},
 				"Double braces are not permitted within interpolated strings; did you mean '\\{'?"
 			)
@@ -6248,23 +6542,19 @@ const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstE
 			const node = {
 				kind = "ExprInterpString",
 				location = {
-					begin = startLocation.begin,
-					end_ = {
-						line = prev_end_line,
-						column = prev_end_col,
-					},
+					begin = vector.create(startLine, startColumn),
+					end_ = vector.create(prev_end_line, prev_end_col),
 				},
 				strings = strings,
 				expressions = expressions,
 			} :: Syntax.AstExprInterpString
 
-			if storeCstData then
+			if sourceStrings and stringPositions then
 				node.cstNode =
 					{ kind = "CstExprInterpString", sourceStrings = sourceStrings, stringPositions = stringPositions }
 			end
 
-			const stack = braceStack
-			const top = (#stack > 0) and stack[#stack] or nil
+			const top = if braceStackSize > 0 then braceStack[braceStackSize] else nil
 
 			if top then
 				if top == BraceType.InterpolatedString then
@@ -6277,7 +6567,10 @@ const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstE
 			return node :: Syntax.AstExprInterpString
 		else
 			return reportExprError(
-				endLocation,
+				{
+					begin = vector.create(currentStartLine, currentStartColumn),
+					end_ = vector.create(endLine, endColumn),
+				},
 				{},
 				"Malformed interpolated string, got %s",
 				ToString(token_type, token_string, token_codepoint)
@@ -6288,14 +6581,14 @@ const function parseInterpStringImpl(): Syntax.AstExprInterpString | Syntax.AstE
 	const node = {
 		kind = "ExprInterpString",
 		location = {
-			begin = startLocation.begin,
-			end_ = (endLocation :: Syntax.Location).end_,
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(endLine, endColumn),
 		},
 		strings = strings,
 		expressions = expressions,
 	} :: Syntax.AstExprInterpString
 
-	if storeCstData then
+	if sourceStrings and stringPositions then
 		node.cstNode =
 			{ kind = "CstExprInterpString", sourceStrings = sourceStrings, stringPositions = stringPositions }
 	end
@@ -6305,22 +6598,22 @@ end
 
 const function parseIfElseExprImpl(): Syntax.AstExprIfElse
 	local hasElse = false
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 
 	nextLexeme() -- skip if / elseif
 
 	const condition = ParserFunctions.parseExpr()
 
-	local thenPosition = { line = 0, column = 0 }
+	local thenLine, thenColumn = 0, 0
 	const hasThen = expectAndConsume(308, "if then else expression")
 	if hasThen then
-		thenPosition = { line = prev_start_line, column = prev_start_col }
+		thenLine, thenColumn = prev_start_line, prev_start_col
 	end
 
 	const trueExpr = ParserFunctions.parseExpr()
 	local falseExpr: Syntax.AstExpr? = nil
 
-	const elsePosition = { line = token_start_line, column = token_start_col }
+	const elseLine, elseColumn = token_start_line, token_start_col
 	local isElseIf = false
 
 	if token_type == 295 then
@@ -6339,7 +6632,10 @@ const function parseIfElseExprImpl(): Syntax.AstExprIfElse
 
 	const node = {
 		kind = "ExprIfElse",
-		location = { begin = start.begin, end_ = resolvedFalseExpr.location.end_ },
+		location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = resolvedFalseExpr.location.end_,
+		},
 		condition = condition,
 		hasThen = hasThen,
 		trueExpr = trueExpr,
@@ -6350,8 +6646,8 @@ const function parseIfElseExprImpl(): Syntax.AstExprIfElse
 	if storeCstData then
 		node.cstNode = {
 			kind = "CstExprIfElse",
-			thenPosition = thenPosition,
-			elsePosition = elsePosition,
+			thenPosition = vector.create(thenLine, thenColumn),
+			elsePosition = vector.create(elseLine, elseColumn),
 			isElseIf = isElseIf,
 		}
 	end
@@ -6361,18 +6657,16 @@ end
 
 -- simpleexp -> NUMBER | STRING | NIL | true | boolean | ... | constructor | [attributes] FUNCTION body | primaryexp
 const function parseSimpleExprImpl(): Syntax.AstExpr
-	const start = snapshot()
-
-	local attributes: Syntax.Attrs = {}
+	local attributes: Syntax.Attrs? = nil
+	local attributeStartLocation: Syntax.Location? = nil
 	local cstAttrLists: { Syntax.CstAttrList }? = nil
 
 	if token_type == 284 or token_type == 285 then
-		attributes, _, cstAttrLists = parseAttributes()
+		attributes, attributeStartLocation, cstAttrLists = parseAttributes()
 
 		if token_type ~= 299 then
 			return reportExprError(
-
-				start,
+				attributeStartLocation :: Syntax.Location,
 				{},
 				"Expected 'function' declaration after attribute, but got %s instead",
 				ToString(token_type, token_string, token_codepoint)
@@ -6381,29 +6675,47 @@ const function parseSimpleExprImpl(): Syntax.AstExpr
 	end
 
 	if token_type == 303 then
+		const location = snapshot()
 		nextLexeme()
 		return {
 			kind = "ExprConstantNil",
-			location = start,
+			location = location,
 		}
 	elseif token_type == 309 then
+		const location = snapshot()
 		nextLexeme()
 		return {
 			kind = "ExprConstantBool",
-			location = start,
+			location = location,
 			value = true,
 		}
 	elseif token_type == 297 then
+		const location = snapshot()
 		nextLexeme()
 		return {
 			kind = "ExprConstantBool",
-			location = start,
+			location = location,
 			value = false,
 		}
 	elseif token_type == 299 then
-		const matchFunction = get_lexeme()
+		const matchFunctionType = token_type
+		const matchFunctionLine, matchFunctionColumn = token_start_line, token_start_col
+		const matchFunctionEndLine, matchFunctionEndColumn = token_end_line, token_end_col
 		nextLexeme()
-		const node = parseFunctionBodyImpl(false, matchFunction, nil, nil, nil, attributes, cstAttrLists, false)
+		const node = parseFunctionBodyImpl(
+			false,
+			matchFunctionType,
+			matchFunctionLine,
+			matchFunctionColumn,
+			matchFunctionEndLine,
+			matchFunctionEndColumn,
+			nil,
+			nil,
+			nil,
+			attributes or (EmptyArray :: Syntax.Attrs),
+			cstAttrLists,
+			false
+		)
 		return node
 	elseif token_type == 280 then
 		return parseNumberImpl()
@@ -6412,21 +6724,28 @@ const function parseSimpleExprImpl(): Syntax.AstExpr
 	elseif token_type == 266 then
 		return parseInterpStringImpl()
 	elseif token_type == 286 then
+		const location = snapshot()
 		nextLexeme()
-		return reportExprError(start, {}, "Malformed string; did you forget to finish it?")
+		return reportExprError(location, {}, "Malformed string; did you forget to finish it?")
 	elseif token_type == 289 then
+		const location = snapshot()
 		nextLexeme()
-		return reportExprError(start, {}, "Double braces are not permitted within interpolated strings; did you mean '\\{'?")
+		return reportExprError(
+			location,
+			{},
+			"Double braces are not permitted within interpolated strings; did you mean '\\{'?"
+		)
 	elseif token_type == 262 then
+		const location = snapshot()
 		if functionStack[#functionStack].vararg then
 			nextLexeme()
 			return {
 				kind = "ExprVarargs",
-				location = start,
+				location = location,
 			}
 		else
 			nextLexeme()
-			return reportExprError(start, {}, "Cannot use '...' outside of a vararg function")
+			return reportExprError(location, {}, "Cannot use '...' outside of a vararg function")
 		end
 	elseif token_type == 123 then
 		return parseTableConstructorImpl()
@@ -6439,17 +6758,17 @@ end
 
 -- asexp -> simpleexp [`::' Type]
 const function parseAssertionExprImpl(): Syntax.AstExpr
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
 	const expr = parseSimpleExprImpl()
 
 	if token_type == 264 then
-		const opPos = { line = token_start_line, column = token_start_col }
+		const opLine, opColumn = token_start_line, token_start_col
 		nextLexeme()
 		const annotation = parseTypeImpl()
 		const node = {
 			kind = "ExprTypeAssertion",
 			location = {
-				begin = start.begin,
+				begin = vector.create(startLine, startColumn),
 				end_ = annotation.location.end_,
 			},
 			expr = expr,
@@ -6459,7 +6778,7 @@ const function parseAssertionExprImpl(): Syntax.AstExpr
 		if storeCstData then
 			node.cstNode = {
 				kind = "CstExprTypeAssertion",
-				opPosition = opPos,
+				opPosition = vector.create(opLine, opColumn),
 			}
 		end
 
@@ -6498,10 +6817,10 @@ const function parseStat(): Syntax.AstStat
 	elseif type_ == 306 then
 		return parseRepeatImpl()
 	elseif type_ == 299 then
-		return parseFunctionStatImpl({}, nil, nil)
+		return parseFunctionStatImpl(EmptyArray :: Syntax.Attrs, nil, nil)
 	elseif type_ == 302 then
 		const start = snapshot()
-		return parseLocalImpl(start, start.begin, {}, nil, false)
+		return parseLocalImpl(start, start.begin, nil, nil, false)
 	elseif type_ == 307 then
 		return parseReturnImpl()
 	elseif type_ == 292 then
@@ -6539,7 +6858,7 @@ const function parseStat(): Syntax.AstStat
 	end
 
 	if ident == "type" then
-		return parseTypeAliasImpl(expr.location, false, expr.location.begin)
+		return parseTypeAliasImpl(expr.location, false, expr.location.begin.x, expr.location.begin.y)
 	end
 
 	if DebugLuauUserDefinedClasses and ident == "class" then
@@ -6558,11 +6877,11 @@ const function parseStat(): Syntax.AstStat
 				)
 			)
 		then
-			return parseExportValueImpl(expr.location, expr.location.begin, {}, nil)
+			return parseExportValueImpl(expr.location, expr.location.begin, EmptyArray :: Syntax.Attrs, nil)
 		elseif token_type == 281 and token_string == "type" then
-			const typeKeywordPos = { line = token_start_line, column = token_start_col }
+			const typeKeywordLine, typeKeywordColumn = token_start_line, token_start_col
 			nextLexeme()
-			return parseTypeAliasImpl(expr.location, true, typeKeywordPos)
+			return parseTypeAliasImpl(expr.location, true, typeKeywordLine, typeKeywordColumn)
 		elseif not LuauExportValueSyntax and DebugLuauUserDefinedClasses and token_type == 281 and token_string == "class" then
 			nextLexeme()
 			return parseClassStatImpl(expr.location, true)
@@ -6574,11 +6893,11 @@ const function parseStat(): Syntax.AstStat
 	end
 
 	if ident == "const" then
-		return parseLocalImpl(expr.location, expr.location.begin, {}, nil, true)
+		return parseLocalImpl(expr.location, expr.location.begin, nil, nil, true)
 	end
 
 	if options.allowDeclarationSyntax and ident == "declare" then
-		return parseDeclarationImpl(expr.location, {})
+		return parseDeclarationImpl(expr.location, EmptyArray :: Syntax.Attrs)
 	end
 
 	if
@@ -6597,9 +6916,11 @@ end
 const function parseReturnTypeImpl(): Syntax.AstTypePack
 	incrementRecursionCounter("type annotation")
 
-	const begin = get_lexeme()
-
 	const begin_type, begin_line, begin_col = token_type, token_start_line, token_start_col
+	const beginLocation = {
+		begin = vector.create(begin_line, begin_col),
+		end_ = vector.create(token_end_line, token_end_col),
+	}
 
 	if token_type ~= 40 then
 		if shouldParseTypePack() then
@@ -6628,25 +6949,24 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 
 	const result: { Syntax.AstType } = {}
 	const resultNames: { Syntax.AstArgumentName | boolean } = {}
-	const commaPositions: { Syntax.Position } = {}
-	const nameColonPositions: { Syntax.Position | boolean } = {}
+	const commaPositions: { Syntax.Position }? = if storeCstData then {} else nil
+	const nameColonPositions: { Syntax.Position | boolean }? = if storeCstData then {} else nil
 
 	local varargAnnotation: Syntax.AstTypePack? = nil
 
 	-- possibly () -> ReturnType
 	if token_type ~= 41 then
-		if storeCstData then
-			varargAnnotation = parseTypeListImpl(result, resultNames, commaPositions, nameColonPositions)
-		else
-			varargAnnotation = parseTypeListImpl(result, resultNames)
-		end
+		varargAnnotation = parseTypeListImpl(result, resultNames, commaPositions, nameColonPositions)
 	end
 
-	const endLoc = snapshot()
-	local closeParenPos = { line = 0, column = 0 }
+	const endStartLine, endStartColumn = token_start_line, token_start_col
+	const endLine, endColumn = token_end_line, token_end_col
+	local closeParenPos: Syntax.Position? = if storeCstData then vector.create(0, 0) else nil
 
 	if expectMatchAndConsume(41, begin_type, begin_line, begin_col, true) then
-		closeParenPos = { line = prev_start_line, column = prev_start_col }
+		if closeParenPos then
+			closeParenPos = vector.create(endStartLine, endStartColumn)
+		end
 	end
 
 	matchRecovery[263] -= 1
@@ -6659,14 +6979,17 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 			if varargAnnotation == nil then
 				const typeGroup = {
 					kind = "TypeGroup",
-					location = { begin = begin.location.begin, end_ = endLoc.end_ },
+					location = {
+						begin = beginLocation.begin,
+						end_ = vector.create(endLine, endColumn),
+					},
 					type = result[1],
 				} :: Syntax.AstTypeGroup
 
 				if storeCstData then
 					typeGroup.cstNode = {
 						kind = "CstTypeGroup",
-						closePosition = closeParenPos,
+						closePosition = closeParenPos :: Syntax.Position,
 					}
 				end
 
@@ -6675,16 +6998,18 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 				inner = result[1]
 			end
 
-			const returnType = parseTypeSuffixImpl(inner, begin.location)
+			const returnType = parseTypeSuffixImpl(inner, begin_line, begin_col)
 
 			-- If parseType parses nothing, then returnType->location.end only points at the last non-type-pack
 			-- type to successfully parse.  We need the span of the whole annotation.
-			const endPos = (#result == 1) and endLoc.end_ or returnType.location.end_
+			const endPos = if #result == 1
+				then vector.create(endLine, endColumn)
+				else returnType.location.end_
 
 			const node = {
 				kind = "TypePackExplicit",
 				location = {
-					begin = begin.location.begin,
+					begin = beginLocation.begin,
 					end_ = endPos,
 				},
 				types = { returnType },
@@ -6702,45 +7027,54 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 		const node = {
 			kind = "TypePackExplicit",
 			location = {
-				begin = begin.location.begin,
-				end_ = endLoc.end_,
+				begin = beginLocation.begin,
+				end_ = vector.create(endLine, endColumn),
 			},
 			types = result,
 			tailType = varargAnnotation,
 		} :: Syntax.AstTypePackExplicit
 
-		if storeCstData then
+		if commaPositions then
 			node.cstNode = {
 				kind = "CstTypePackExplicit",
-				openParenthesesPosition = begin.location.begin,
-				closeParenthesesPosition = closeParenPos,
+				openParenthesesPosition = beginLocation.begin,
+				closeParenthesesPosition = closeParenPos :: Syntax.Position,
 				commaPositions = commaPositions,
 			}
 		end
 		return node
 	end
 
-	const returnArrowPosition = { line = token_start_line, column = token_start_col }
-	const tail = parseFunctionTypeTailImpl(begin, {}, {}, {}, result, resultNames, varargAnnotation)
+	const returnArrowLine, returnArrowColumn = token_start_line, token_start_col
+	const tail = parseFunctionTypeTailImpl(
+		begin_type,
+		beginLocation,
+		EmptyArray :: Syntax.Attrs,
+		EmptyArray :: { Syntax.AstGenericType },
+		EmptyArray :: { Syntax.AstGenericTypePack },
+		result,
+		resultNames,
+		varargAnnotation
+	)
 
-	if storeCstData and tail.kind == "TypeFunction" then
+	if commaPositions and nameColonPositions and tail.kind == "TypeFunction" then
 		tail.cstNode = {
 			kind = "CstTypeFunction",
-			openGenericsPosition = { line = 0, column = 0 },
+			openGenericsPosition = vector.create(0, 0),
 			genericsCommaPositions = {},
-			closeGenericsPosition = { line = 0, column = 0 },
-			openArgsPosition = begin.location.begin,
+			closeGenericsPosition = vector.create(0, 0),
+			openArgsPosition = beginLocation.begin,
 			argumentNameColonPositions = nameColonPositions,
 			argumentsCommaPositions = commaPositions,
-			closeArgsPosition = closeParenPos,
-			returnArrowPosition = returnArrowPosition,
+			closeArgsPosition = closeParenPos :: Syntax.Position,
+			returnArrowPosition = vector.create(returnArrowLine, returnArrowColumn),
 		}
 	end
 
 	const node = {
 		kind = "TypePackExplicit",
 		location = {
-			begin = begin.location.begin,
+			begin = beginLocation.begin,
 			end_ = tail.location.end_,
 		},
 		types = { tail },
@@ -6760,43 +7094,64 @@ end
 const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boolean): (Syntax.AstType?, Syntax.AstTypePack?)
 	incrementRecursionCounter("type annotation")
 
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
+	const startEndLine, startEndColumn = token_end_line, token_end_col
 
 	if token_type == 284 or token_type == 285 then
 		if not inDeclarationContext then
-			return reportTypeError(start, {}, "attributes are not allowed in declaration context"), nil
+			return reportTypeError(
+				{
+					begin = vector.create(startLine, startColumn),
+					end_ = vector.create(startEndLine, startEndColumn),
+				},
+				{},
+				"attributes are not allowed in declaration context"
+			),
+				nil
 		else
 			const attributes = parseAttributes()
 
 			return parseFunctionTypeImpl(allowPack, attributes), nil
 		end
 	elseif token_type == 303 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		nextLexeme()
 
 		return {
 			kind = "TypeReference",
-			location = start,
+			location = location,
 			name = "nil",
-			nameLocation = start,
+			nameLocation = location,
 			hasParameterList = false,
-			parameters = {},
+			parameters = EmptyArray :: { Syntax.AstTypeOrPack },
 		} :: Syntax.AstTypeReference,
 			nil
 	elseif token_type == 309 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		nextLexeme()
 
 		return {
 			kind = "TypeSingletonBool",
-			location = start,
+			location = location,
 			value = true,
 		} :: Syntax.AstTypeSingletonBool,
 			nil
 	elseif token_type == 297 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		nextLexeme()
 
 		return {
 			kind = "TypeSingletonBool",
-			location = start,
+			location = location,
 			value = false,
 		} :: Syntax.AstTypeSingletonBool,
 			nil
@@ -6809,11 +7164,15 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 			sourceString = token_string
 		end
 
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		const chars = parseCharArrayImpl()
 		if chars then
 			const node = {
 				kind = "TypeSingletonString",
-				location = start,
+				location = location,
 				value = chars,
 			} :: Syntax.AstTypeSingletonString
 
@@ -6828,52 +7187,75 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 
 			return node, nil
 		else
-			return reportTypeError(start, {}, "String literal contains malformed escape sequence"), nil
+			return reportTypeError(location, {}, "String literal contains malformed escape sequence"), nil
 		end
 	elseif token_type == 266 or token_type == 269 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		parseInterpStringImpl()
 
-		return reportTypeError(start, {}, "Interpolated string literals cannot be used as types"), nil
+		return reportTypeError(location, {}, "Interpolated string literals cannot be used as types"), nil
 	elseif token_type == 286 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		nextLexeme()
-		return reportTypeError(start, {}, "Malformed string; did you forget to finish it?"), nil
+		return reportTypeError(location, {}, "Malformed string; did you forget to finish it?"), nil
 	elseif token_type == 281 then
-		local name = parseNameImpl("type name")
+		local name, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn = parseNameScalars("type name")
+		name = name or "%error-id%"
+		local nameLocation = {
+			begin = vector.create(nameStartLine, nameStartColumn),
+			end_ = vector.create(nameEndLine, nameEndColumn),
+		}
 		local prefix: string? = nil
 		local prefixLoc: Syntax.Location? = nil
 		local prefixPointPos: Syntax.Position? = nil
 
 		if token_type == 46 then
-			prefixPointPos = { line = token_start_line, column = token_start_col }
+			if storeCstData then
+				prefixPointPos = vector.create(token_start_line, token_start_col)
+			end
 			nextLexeme()
-			prefix = name.name.value
-			prefixLoc = name.location
-			name = parseIndexNameImpl("field name", name.location.end_)
+			prefix = name
+			prefixLoc = nameLocation
+			name, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
+				parseIndexNameScalars("field name", nameLocation.end_)
+			name = name or "%error-id%"
+			nameLocation = {
+				begin = vector.create(nameStartLine, nameStartColumn),
+				end_ = vector.create(nameEndLine, nameEndColumn),
+			}
 		elseif token_type == 262 then
 			report(snapshot(), "Unexpected '...' after type name; type pack is not allowed in this context")
 
 			nextLexeme()
-		elseif name.name.value == "typeof" then
-			const typeofBegin = get_lexeme()
+		elseif name == "typeof" then
+			const typeofBeginType = token_type
+			const typeofBeginLine, typeofBeginColumn = token_start_line, token_start_col
 			const openParenFound = expectAndConsume(40, "typeof type")
 			const expr = ParserFunctions.parseExpr()
-			const endLoc = snapshot()
-			local closePosition = { line = 0, column = 0 }
+			const endStartLine, endStartColumn = token_start_line, token_start_col
+			const endLine, endColumn = token_end_line, token_end_col
+			local closeLine, closeColumn = 0, 0
 			if expectMatchAndConsume(
 				41,
-				typeofBegin.type,
-				typeofBegin.location.begin.line,
-				typeofBegin.location.begin.column,
+				typeofBeginType,
+				typeofBeginLine,
+				typeofBeginColumn,
 				false
 			) then
-				closePosition = endLoc.begin
+				closeLine, closeColumn = endStartLine, endStartColumn
 			end
 
 			const node = {
 				kind = "TypeTypeof",
 				location = {
-					begin = start.begin,
-					end_ = endLoc.end_,
+					begin = vector.create(startLine, startColumn),
+					end_ = vector.create(endLine, endColumn),
 				},
 				expr = expr,
 			} :: Syntax.AstTypeTypeof
@@ -6881,19 +7263,21 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 			if storeCstData then
 				node.cstNode = {
 					kind = "CstTypeTypeof",
-					openPosition = if openParenFound then typeofBegin.location.begin else { line = 0, column = 0 },
-					closePosition = closePosition,
+					openPosition = if openParenFound
+						then vector.create(typeofBeginLine, typeofBeginColumn)
+						else vector.create(0, 0),
+					closePosition = vector.create(closeLine, closeColumn),
 				}
 			end
 			return node, nil
 		end
 
 		local hasParams = false
-		local params: { Syntax.AstTypeOrPack } = {}
+		local params = EmptyArray :: { Syntax.AstTypeOrPack }
 
-		const openPosRef = if storeCstData then { { line = 0, column = 0 } } else nil
+		const openPosRef = if storeCstData then { vector.create(0, 0) } else nil
 		const commaPosRef = if storeCstData then {} else nil
-		const closePosRef = if storeCstData then { { line = 0, column = 0 } } else nil
+		const closePosRef = if storeCstData then { vector.create(0, 0) } else nil
 
 		if token_type == 60 then
 			hasParams = true
@@ -6903,13 +7287,13 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 		const node = {
 			kind = "TypeReference",
 			location = {
-				begin = start.begin,
-				end_ = { line = prev_end_line, column = prev_end_col },
+				begin = vector.create(startLine, startColumn),
+				end_ = vector.create(prev_end_line, prev_end_col),
 			},
 			prefix = prefix,
-			name = name.name.value,
+			name = name,
 			prefixLocation = prefixLoc,
-			nameLocation = name.location,
+			nameLocation = nameLocation,
 			hasParameterList = hasParams,
 			parameters = params,
 		} :: Syntax.AstTypeReference
@@ -6928,19 +7312,23 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 	elseif token_type == 123 then
 		return parseTableTypeImpl(inDeclarationContext), nil
 	elseif token_type == 40 or token_type == 60 then
-		return parseFunctionTypeImpl(allowPack, {})
+		return parseFunctionTypeImpl(allowPack, EmptyArray :: Syntax.Attrs)
 	elseif token_type == 299 then
+		const location = {
+			begin = vector.create(startLine, startColumn),
+			end_ = vector.create(startEndLine, startEndColumn),
+		}
 		nextLexeme()
 
-		return reportTypeError(start, {}, "Using 'function' as a type annotation is not supported..."), nil
+		return reportTypeError(location, {}, "Using 'function' as a type annotation is not supported..."), nil
 	else
 		const astErrorLocation = {
-			begin = { line = prev_end_line, column = prev_end_col },
-			end_ = start.begin,
+			begin = vector.create(prev_end_line, prev_end_col),
+			end_ = vector.create(startLine, startColumn),
 		}
 		const parseErrorLocation = {
-			begin = { line = prev_end_line, column = prev_end_col },
-			end_ = start.end_,
+			begin = vector.create(prev_end_line, prev_end_col),
+			end_ = vector.create(startEndLine, startEndColumn),
 		}
 
 		return reportMissingTypeError(
@@ -6962,7 +7350,8 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 	-- this handles recursive calls to parseSubExpr/parseExpr
 	incrementRecursionCounter("expression")
 
-	const start = snapshot()
+	const startLine, startColumn = token_start_line, token_start_col
+	local startPosition: Syntax.Position? = nil
 	local expr: Syntax.AstExpr? = nil
 
 	local uop: number? = UnaryOpLookup[token_type] -- Fix: Lookup based on token type
@@ -6971,7 +7360,8 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 	end
 
 	if uop then
-		const opPosition = { line = token_start_line, column = token_start_col }
+		const opLine, opColumn = token_start_line, token_start_col
+		startPosition = vector.create(startLine, startColumn)
 		nextLexeme()
 
 		const subexpr = ParserFunctions.parseExpr(8)
@@ -6979,7 +7369,7 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 		expr = {
 			kind = "ExprUnary",
 			location = {
-				begin = start.begin,
+				begin = startPosition,
 				end_ = subexpr.location.end_,
 			},
 			op = uop :: number,
@@ -6989,7 +7379,7 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 		if storeCstData then
 			expr.cstNode = {
 				kind = "CstExprOp",
-				opPosition = opPosition,
+				opPosition = vector.create(opLine, opColumn),
 			}
 		end
 	else
@@ -7001,7 +7391,10 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 
 	-- expand while operators have priorities higher than `limit'
 	while op and BinaryPriority[op][1] > limit do
-		const opPosition = { line = token_start_line, column = token_start_col }
+		const opLine, opColumn = token_start_line, token_start_col
+		if not startPosition then
+			startPosition = vector.create(startLine, startColumn)
+		end
 		nextLexeme()
 
 		-- read sub-expression with higher priority
@@ -7010,7 +7403,7 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 		expr = {
 			kind = "ExprBinary",
 			location = {
-				begin = start.begin,
+				begin = startPosition,
 				end_ = nextExpr.location.end_,
 			},
 			op = op :: number,
@@ -7021,7 +7414,7 @@ const function parseExprImpl(limit_val: number?): Syntax.AstExpr
 		if storeCstData then
 			expr.cstNode = {
 				kind = "CstExprOp",
-				opPosition = opPosition,
+				opPosition = vector.create(opLine, opColumn),
 			}
 		end
 
@@ -7045,15 +7438,14 @@ const function parseChunk(sourceText: string, parseOptions: Syntax.Options): Syn
 	captureComments = parseOptions.captureComments == true
 	storeCstData = parseOptions.storeCstData == true
 
-	source = sourceText
 	buff_data = buffer.fromstring(sourceText)
 	size = #sourceText
 
 	offset = 0
 
 	if parseOptions.parseFragment and parseOptions.parseFragment.resumePosition then
-		line = parseOptions.parseFragment.resumePosition.line
-		lineOffset = 0 - parseOptions.parseFragment.resumePosition.column
+		line = parseOptions.parseFragment.resumePosition.x
+		lineOffset = 0 - parseOptions.parseFragment.resumePosition.y
 	else
 		line = 0
 		lineOffset = 0
@@ -7062,6 +7454,7 @@ const function parseChunk(sourceText: string, parseOptions: Syntax.Options): Syn
 	const startColumn = 0 - lineOffset
 
 	braceStack = {}
+	braceStackSize = 0
 
 	token_type = 0
 
@@ -7081,12 +7474,12 @@ const function parseChunk(sourceText: string, parseOptions: Syntax.Options): Syn
 
 	recursionCounter = 0
 
-	commentLocations = {}
-	hotcomments = {}
-	parseErrors = {}
-	declaredExportBindings = {}
+	commentLocations = EmptyArray :: { Syntax.Comment }
+	hotcomments = EmptyArray :: { Syntax.HotComment }
+	parseErrors = EmptyArray :: { Syntax.ParseError }
+	declaredExportBindings = EmptyArray :: { [string]: Syntax.Location }
 	hasModuleReturn = false
-	classesWithinModule = {}
+	classesWithinModule = EmptyArray :: { [string]: boolean }
 
 	hotcommentHeader = true
 
