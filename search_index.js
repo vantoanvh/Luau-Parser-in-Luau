@@ -1,7 +1,7 @@
 window.SEARCH_INDEX = [
   {
     "name": "Position",
-    "desc": "Represents a position in the source code. Used to pinpoint exact locations for error reporting and CST data.",
+    "desc": "A Luau vector source coordinate: x is the 0-based line, y is the 0-based column, and z is unused.",
     "file": "core.html",
     "tags": []
   },

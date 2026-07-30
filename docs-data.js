@@ -1,8 +1,8 @@
 window.DOCS_DATA = {
   "title": "LuauParser Source Reference",
-  "generatedFrom": "`gh-pages/docs-data.js`, rewritten from `Parser/Syntax.luau` with enum facts from `Parser/init.luau`.",
+  "generatedFrom": "`gh-pages/docs-data.js`, rewritten from `Parser-Vec/Syntax.luau` with enum facts from `Parser-Vec/init.luau`.",
   "coverage": [
-    "Every exported type from `Parser/Syntax.luau`.",
+    "Every exported type from `Parser-Vec/Syntax.luau`.",
     "Descriptions rewritten from the actual stored fields instead of README-era prose.",
     "Short source-oriented examples for each exported record or union.",
     "Field-level notes derived from the typed shape and parser enums."
@@ -40,8 +40,8 @@ window.DOCS_DATA = {
         "CORE"
       ],
       "tags": [],
-      "description": "0-based source coordinate used by AST nodes, CST nodes, and parse diagnostics.",
-      "example": "local startPos: Position = { line = 4, column = 1 }\nlocal endPos: Position = { line = 4, column = 18 }",
+      "description": "0-based source coordinate stored as a Luau vector. The `x` component is the line, `y` is the column, and `z` is unused. Vector components are f32, so integer coordinates are exact through 16,777,216.",
+      "example": "local startPos: Position = vector.create(4, 1)\nlocal endPos: Position = vector.create(4, 18)\nprint(startPos.x, startPos.y) -- line, column",
       "table": {
         "type": "fields",
         "headers": [
@@ -51,14 +51,19 @@ window.DOCS_DATA = {
         ],
         "rows": [
           [
-            "line",
-            "number",
-            "0-based line component of this position record."
+            "x",
+            "number (f32)",
+            "0-based source line."
           ],
           [
-            "column",
-            "number",
-            "0-based column component of this position record."
+            "y",
+            "number (f32)",
+            "0-based source column."
+          ],
+          [
+            "z",
+            "number (f32)",
+            "Unused by the parser and currently zero."
           ]
         ]
       }
@@ -73,7 +78,7 @@ window.DOCS_DATA = {
       ],
       "tags": [],
       "description": "Half-open source span with a `begin` position and an `end_` position.",
-      "example": "local startPos: Position = { line = 4, column = 1 }\nlocal loc: Location = { begin = startPos, end_ = endPos }",
+      "example": "local startPos: Position = vector.create(4, 1)\nlocal endPos: Position = vector.create(4, 18)\nlocal loc: Location = { begin = startPos, end_ = endPos }\nprint(loc.begin.x, loc.begin.y) -- line, column",
       "table": {
         "type": "fields",
         "headers": [

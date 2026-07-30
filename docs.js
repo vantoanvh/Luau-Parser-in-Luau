@@ -16,7 +16,7 @@
 		},
 		"getting-started": {
 			title: "Getting Started",
-			description: "Public API, parser options, result shape, and exported enums.",
+			description: "Public API, vector positions, parser options, result shape, and exported enums.",
 		},
 		ast: {
 			title: "Ast",
@@ -206,6 +206,7 @@
 	function isGuideAnchor(anchor) {
 		return anchor === "api"
 			|| anchor === "options"
+			|| anchor === "positions"
 			|| anchor === "result"
 			|| anchor === "enums"
 			|| anchor === "cst-access";
@@ -423,7 +424,7 @@
 						<em>linters, formatters, highlighters, refactoring tools,</em> or full <em>Luau compilers and transpilers</em>.
 					</p>
 					<p>
-						Parser rollout flags are kept near the top of <code>Parser/init.luau</code>. You can change them when you need this port to mirror a specific Luau rollout,
+						Parser rollout flags are kept near the top of <code>Parser-Vec/init.luau</code>. You can change them when you need this port to mirror a specific Luau rollout,
 						including gated syntax such as user-defined classes.
 					</p>
 				</section>
@@ -433,6 +434,10 @@
 					<p>
 						The parser follows the upstream procedural parser shape and resets its internal state for each parse call. CST data is attached directly to supported AST nodes
 						when <code>storeCstData = true</code>, instead of exposing a separate CST map.
+					</p>
+					<p>
+						Source positions are Luau vectors: <code>position.x</code> is the 0-based line and <code>position.y</code> is the 0-based column.
+						The <code>z</code> component is unused.
 					</p>
 				</section>
 
@@ -451,7 +456,7 @@
 			<div class="hero-block guide-hero">
 				<div class="hero-kicker">Getting Started</div>
 				<h1>Public API & Usage</h1>
-				<p>The main entry point is <code>Parser.parse(source, options?)</code>. This page documents the current exported surface from <code>Parser/init.luau</code> and the typed shapes from <code>Parser/Syntax.luau</code>.</p>
+				<p>The main entry point is <code>Parser.parse(source, options?)</code>. This page documents the current exported surface from <code>Parser-Vec/init.luau</code> and the typed shapes from <code>Parser-Vec/Syntax.luau</code>.</p>
 			</div>
 		`;
 	}
@@ -493,6 +498,18 @@
 			"\t}?,",
 			"\tstoreCstData: boolean?,",
 			"}",
+		].join("\n");
+
+		const positionBlock = [
+			"type Position = vector",
+			"type Location = {",
+			"\tbegin: Position,",
+			"\tend_: Position,",
+			"}",
+			"",
+			"local location = result.root.location",
+			"print(location.begin.x, location.begin.y) -- line, column",
+			"print(location.end_.x, location.end_.y) -- line, column",
 		].join("\n");
 
 		const resultBlock = [
@@ -573,19 +590,26 @@
 
 				<section class="guide-section" id="options">
 					<h2>Options</h2>
-					<p>The current options type comes from <code>Parser/Syntax.luau</code>. The two commonly used toggles are <code>captureComments</code> and <code>storeCstData</code>. <code>parseFragment</code> is for resumed parsing, and <code>noErrorLimit</code> lets the parser collect beyond the normal error cap.</p>
+					<p>The current options type comes from <code>Parser-Vec/Syntax.luau</code>. The two commonly used toggles are <code>captureComments</code> and <code>storeCstData</code>. <code>parseFragment</code> is for resumed parsing, and <code>noErrorLimit</code> lets the parser collect beyond the normal error cap.</p>
 					${renderExample(optionsBlock)}
+				</section>
+
+				<section class="guide-section" id="positions">
+					<h2>Positions and Locations</h2>
+					<p><code>Position</code> is a Luau <code>vector</code>, not a table. Use <code>.x</code> for the 0-based line and <code>.y</code> for the 0-based column. The <code>.z</code> component is unused and currently zero. Vector components are f32, so integer coordinates are exact through 16,777,216. A <code>Location</code> remains a table containing <code>begin</code> and <code>end_</code> vectors.</p>
+					${renderExample(positionBlock)}
 				</section>
 
 				<section class="guide-section" id="result">
 					<h2>Result</h2>
 					<p><code>result.root</code> is an <code>AstStatBlock?</code>, not a flat <code>{AstNode}</code> list. <code>result.lines</code> reports the parsed line count. Comments, hotcomments, and parse errors are returned separately.</p>
+					<p>Parser output should be treated as read-only. Some empty array fields are shared and frozen to avoid per-node allocations; clone an array with <code>table.clone</code> before adding values to it.</p>
 					${renderExample(resultBlock)}
 				</section>
 
 				<section class="guide-section" id="enums">
 					<h2>Enums</h2>
-					<p>The parser currently exports <code>QuoteStyle</code>, <code>BraceType</code>, <code>UnaryOp</code>, <code>BinaryOp</code>, and <code>CstQuotes</code> directly from <code>Parser/init.luau</code>. The code block below documents each enum member inline.</p>
+					<p>The parser currently exports <code>QuoteStyle</code>, <code>BraceType</code>, <code>UnaryOp</code>, <code>BinaryOp</code>, and <code>CstQuotes</code> directly from <code>Parser-Vec/init.luau</code>. The code block below documents each enum member inline.</p>
 					${renderExample(enumsBlock)}
 				</section>
 
@@ -746,6 +770,7 @@
 			elements.jumpLinks.innerHTML = [
 				["api", "Public API"],
 				["options", "Options"],
+				["positions", "Positions"],
 				["result", "Result"],
 				["enums", "Enums"],
 				["cst-access", "CST Access"],
