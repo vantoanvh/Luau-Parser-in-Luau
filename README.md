@@ -13,7 +13,7 @@
   </ul>
 </div>
 
-![Ver](https://img.shields.io/badge/version-v0.728.5-blue?style=plastic)
+![Ver](https://img.shields.io/badge/version-v0.735-blue?style=plastic)
 [![License](https://img.shields.io/badge/license-MIT-97ca00?style=plastic)](https://github.com/vantoanvh/LuauParser/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/documentation-online-red?style=plastic&logo=github)](https://vantoanvh.github.io/LuauParser)
 [![Release](https://img.shields.io/badge/release-latest-darkblue?style=plastic&logo=luau&logoColor=white)](https://github.com/vantoanvh/LuauParser/releases/latest)
