@@ -424,7 +424,7 @@
 						<em>linters, formatters, highlighters, refactoring tools,</em> or full <em>Luau compilers and transpilers</em>.
 					</p>
 					<p>
-						Parser rollout flags are kept near the top of <code>Parser-Vec/init.luau</code>. You can change them when you need this port to mirror a specific Luau rollout,
+						Parser rollout flags are kept near the top of <code>LuauParser/init.luau</code>. You can change them when you need this port to mirror a specific Luau rollout,
 						including gated syntax such as user-defined classes.
 					</p>
 				</section>
@@ -456,7 +456,7 @@
 			<div class="hero-block guide-hero">
 				<div class="hero-kicker">Getting Started</div>
 				<h1>Public API & Usage</h1>
-				<p>The main entry point is <code>Parser.parse(source, options?)</code>. This page documents the current exported surface from <code>Parser-Vec/init.luau</code> and the typed shapes from <code>Parser-Vec/Syntax.luau</code>.</p>
+				<p>The main entry point is <code>Parser.parse(source, options?)</code>. This page documents the current exported surface from <code>LuauParser/init.luau</code> and the typed shapes from <code>LuauParser/Syntax.luau</code>.</p>
 			</div>
 		`;
 	}
@@ -590,7 +590,7 @@
 
 				<section class="guide-section" id="options">
 					<h2>Options</h2>
-					<p>The current options type comes from <code>Parser-Vec/Syntax.luau</code>. The two commonly used toggles are <code>captureComments</code> and <code>storeCstData</code>. <code>parseFragment</code> is for resumed parsing, and <code>noErrorLimit</code> lets the parser collect beyond the normal error cap.</p>
+					<p>The current options type comes from <code>LuauParser/Syntax.luau</code>. The two commonly used toggles are <code>captureComments</code> and <code>storeCstData</code>. <code>parseFragment</code> is for resumed parsing, and <code>noErrorLimit</code> lets the parser collect beyond the normal error cap.</p>
 					${renderExample(optionsBlock)}
 				</section>
 
@@ -609,7 +609,7 @@
 
 				<section class="guide-section" id="enums">
 					<h2>Enums</h2>
-					<p>The parser currently exports <code>QuoteStyle</code>, <code>BraceType</code>, <code>UnaryOp</code>, <code>BinaryOp</code>, and <code>CstQuotes</code> directly from <code>Parser-Vec/init.luau</code>. The code block below documents each enum member inline.</p>
+					<p>The parser currently exports <code>QuoteStyle</code>, <code>BraceType</code>, <code>UnaryOp</code>, <code>BinaryOp</code>, and <code>CstQuotes</code> directly from <code>LuauParser/init.luau</code>. The code block below documents each enum member inline.</p>
 					${renderExample(enumsBlock)}
 				</section>
 

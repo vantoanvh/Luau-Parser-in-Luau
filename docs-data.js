@@ -1,8 +1,8 @@
 window.DOCS_DATA = {
   "title": "LuauParser Source Reference",
-  "generatedFrom": "`gh-pages/docs-data.js`, rewritten from `Parser-Vec/Syntax.luau` with enum facts from `Parser-Vec/init.luau`.",
+  "generatedFrom": "`gh-pages/docs-data.js`, rewritten from `LuauParser/Syntax.luau` with enum facts from `LuauParser/init.luau` (Luau 0.735 parser surface).",
   "coverage": [
-    "Every exported type from `Parser-Vec/Syntax.luau`.",
+    "Every exported type from `LuauParser/Syntax.luau`.",
     "Descriptions rewritten from the actual stored fields instead of README-era prose.",
     "Short source-oriented examples for each exported record or union.",
     "Field-level notes derived from the typed shape and parser enums."
@@ -3364,8 +3364,8 @@ window.DOCS_DATA = {
         "Statement",
         "Class"
       ],
-      "description": "Class declaration statement behind the user-defined class rollout flag.",
-      "example": "class User\n    public name: string\n    public score: number\n\n    function getName(self)\n        return self.name\n    end\nend",
+      "description": "Class declaration statement behind the user-defined class rollout flag, including optional `open` and `extends` syntax.",
+      "example": "open class User extends Base\n    public name: string\n\n    function getName(self)\n        return self.name\n    end\nend",
       "table": {
         "type": "fields",
         "headers": [
@@ -3390,6 +3390,11 @@ window.DOCS_DATA = {
             "Local binding created for the class name."
           ],
           [
+            "super",
+            "[AstExpr](#astexpr)?",
+            "Optional class reference expression from the `extends` clause."
+          ],
+          [
             "members",
             "{ [AstClassMember](#astclassmember) }",
             "Class members stored in source order."
@@ -3398,6 +3403,11 @@ window.DOCS_DATA = {
             "exported",
             "boolean",
             "Whether this class declaration was exported."
+          ],
+          [
+            "open",
+            "boolean",
+            "Whether this class declaration used the `open` modifier."
           ],
           [
             "hasSemicolon",
@@ -3571,6 +3581,11 @@ window.DOCS_DATA = {
             "prefixLocation",
             "[Location](#location)?",
             "Source span covering the prefix of this type reference."
+          ],
+          [
+            "prefixLocal",
+            "[AstLocal](#astlocal)?",
+            "Optional local binding captured for the prefix when `LuauTrackPrefixLocal` is enabled."
           ],
           [
             "name",
