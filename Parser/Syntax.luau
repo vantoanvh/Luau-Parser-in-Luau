@@ -553,8 +553,10 @@ export type AstStatClass = {
 	kind: "StatClass",
 	location: Location,
 	name: AstLocal,
+	super: AstExpr?,
 	members: { AstClassMember },
 	exported: boolean,
+	open: boolean,
 	hasSemicolon: boolean?,
 }
 
@@ -584,6 +586,7 @@ export type AstTypeReference = {
 	hasParameterList: boolean,
 	prefix: string?,
 	prefixLocation: Location?,
+	prefixLocal: AstLocal?,
 	name: string,
 	nameLocation: Location,
 	parameters: { AstTypeOrPack },

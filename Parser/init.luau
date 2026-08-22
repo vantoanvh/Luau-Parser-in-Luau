@@ -4,14 +4,18 @@
 
 -- // Parser Settings
 
-const LuauIntegerType2 = false
-const LuauExportValueSyntax = false
-const DebugLuauNoInline = false
-const DebugLuauUserDefinedClasses = false
-const LuauAllowGlobalDeclarationToBeCalledClass = false
-const LuauDisallowExternClassInTypeDefinitions = false
-const LuauTableEntriesDontNeedToMatchIndent = true
-const LuauStoreConstKeywordBegin = true
+const Flags = {
+	LuauIntegerType2 = false,
+	LuauExportValueSyntax = false,
+	DebugLuauNoInline = false,
+	DebugLuauUserDefinedClasses = false,
+	LuauAllowGlobalDeclarationToBeCalledClass = false,
+	LuauDisallowExternClassInTypeDefinitions = false,
+	LuauStoreConstKeywordBegin = true,
+	LuauTrackPrefixLocal = false,
+	LuauNoDuplicateBinaryPrefix = false,
+	LuauSingleTypeOptionalPackReturnsAttributeParens = false,
+}
 
 const LuauRecursionLimit = 1000
 const LuauTypeLengthLimit = 1000
@@ -210,6 +214,7 @@ const ExprLValues = {
 }
 
 const AllowedClassMetamethods = {
+	__init = true,
 	__call = true,
 	__concat = true,
 	__unm = true,
@@ -706,7 +711,7 @@ local hotcomments = {} :: { Syntax.HotComment }
 local parseErrors: { Syntax.ParseError } = {}
 local declaredExportBindings: { [string]: Syntax.Location } = {}
 local hasModuleReturn = false
-local classesWithinModule: { [string]: boolean } = {}
+local classesWithinModule: { [string]: Syntax.AstStatClass } = {}
 
 type TableIndexerResult = {
 	node: Syntax.AstTableIndexer,
@@ -1882,6 +1887,10 @@ const function isExprLValue(expr: Syntax.AstExpr): boolean
 		return local_.isConst ~= true
 	end
 
+	if expr.kind == "ExprGlobal" and Flags.DebugLuauUserDefinedClasses and classesWithinModule[expr.name] then
+		return false
+	end
+
 	return ExprLValues[expr.kind] == true
 end
 
@@ -1893,6 +1902,19 @@ const function reportLValueError(expr: Syntax.AstExpr): Syntax.AstExprError
 			"Variable '%s' is constant and may not be reassigned",
 			expr["local"].name
 		)
+	end
+
+	if expr.kind == "ExprGlobal" and Flags.DebugLuauUserDefinedClasses then
+		const classStat = classesWithinModule[expr.name]
+		if classStat then
+			return reportExprError(
+				expr.location,
+				{ expr },
+				"'%s' refers to a class and cannot be used as a variable name (defined on line %d)",
+				expr.name,
+				classStat.location.begin.x + 1
+			)
+		end
 	end
 
 	return reportExprError(expr.location, { expr }, "Assigned expression must be a variable or a field")
@@ -2107,6 +2129,7 @@ const function parseOptionalTypeImpl(): Syntax.AstType?
 		return nil
 	end
 end
+
 const function parseBinding(isConst: boolean?): Syntax.Binding
 	local name, startLine, startColumn, endLine, endColumn = parseNameScalars("variable name")
 	name = name or "%error-id%"
@@ -3312,7 +3335,7 @@ const function parseFunctionStatImpl(
 	local expr: Syntax.AstExpr, hasSelf, debugname = parseFunctionName()
 
 	if not isExprLValue(expr) then
-		expr = if LuauExportValueSyntax
+		expr = if Flags.LuauExportValueSyntax
 			then reportLValueError(expr)
 			else reportExprError(expr.location, { expr }, "Assigned expression must be a variable or a field")
 	end
@@ -3371,7 +3394,7 @@ const function validateAttribute(
 	if entry then
 		type_ = entry.type
 		argsValidator = entry.argsValidator
-	elseif DebugLuauNoInline and kDebugAttributeEntries[attributeName] then
+	elseif Flags.DebugLuauNoInline and kDebugAttributeEntries[attributeName] then
 		type_ = kDebugAttributeEntries[attributeName].type
 	else
 		if #attributeName == 0 then
@@ -3428,13 +3451,7 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 	const brace_type, brace_line, brace_col = token_type, token_start_line, token_start_col
 	expectAndConsume(123, "table literal")
 
-	local lastElementIndent = 0
-
 	while token_type ~= 125 do
-		if not LuauTableEntriesDontNeedToMatchIndent then
-			lastElementIndent = token_start_col
-		end
-
 		local indexerOpenPos: Syntax.Position? = nil
 		local indexerClosePos: Syntax.Position? = nil
 		local equalsPos: Syntax.Position? = nil
@@ -3558,10 +3575,7 @@ const function parseTableConstructorImpl(): Syntax.AstExprTable
 
 		if token_type == 44 or token_type == 59 then
 			nextLexeme()
-		elseif
-			(token_type == 91 or token_type == 281)
-			and (LuauTableEntriesDontNeedToMatchIndent or token_start_col == lastElementIndent)
-		then
+		elseif token_type == 91 or token_type == 281 then
 			report(snapshot(), "Expected ',' after table constructor element")
 		elseif token_type ~= 125 then
 			break
@@ -3980,7 +3994,7 @@ const function parseLocalImpl(
 			name = var,
 			func = body,
 			isConst = isConst,
-			constKeywordBegin = if isConst and LuauStoreConstKeywordBegin then keywordPosition else nil,
+			constKeywordBegin = if isConst and Flags.LuauStoreConstKeywordBegin then keywordPosition else nil,
 		} :: Syntax.AstStatLocalFunction
 
 		if storeCstData then
@@ -4091,7 +4105,55 @@ const function exportLocalStat(stat: Syntax.AstStat, keywordLocation: Syntax.Loc
 	return stat
 end
 
-const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Syntax.AstStatClass | Syntax.AstStatError
+-- classrefexp -> NAME { `.' NAME | `[' exp `]' }
+const function parseClassRefExprImpl(): Syntax.AstExpr
+	const start = snapshot().begin
+	const name = parseNameExprImpl("class reference expression")
+
+	if token_type == 46 then
+		const opPosition = snapshot().begin
+		nextLexeme()
+		const index, indexStartLine, indexStartColumn, indexEndLine, indexEndColumn =
+			parseNameScalars("class reference expression")
+		const indexName = index or "%error-id%"
+		return {
+			kind = "ExprIndexName",
+			location = {
+				begin = start,
+				end_ = vector.create(indexEndLine, indexEndColumn),
+			},
+			expr = name,
+			index = indexName,
+			indexLocation = {
+				begin = vector.create(indexStartLine, indexStartColumn),
+				end_ = vector.create(indexEndLine, indexEndColumn),
+			},
+			opPosition = opPosition,
+			op = 46,
+		} :: Syntax.AstExprIndexName
+	elseif token_type == 91 then
+		nextLexeme()
+		const key = ParserFunctions.parseExpr()
+		local endPosition = key.location.end_
+		if expectAndConsume(93, "class reference expression") then
+			endPosition = vector.create(prev_end_line, prev_end_col)
+		end
+		return {
+			kind = "ExprIndexExpr",
+			location = { begin = start, end_ = endPosition },
+			expr = name,
+			index = key,
+		} :: Syntax.AstExprIndexExpr
+	end
+
+	return name
+end
+
+const function parseClassStatImpl(
+	start: Syntax.Location,
+	exported: boolean,
+	open: boolean
+): Syntax.AstStatClass | Syntax.AstStatError
 	local name = parseNameOptImpl("type name")
 
 	if not name then
@@ -4101,15 +4163,22 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 		} :: Syntax.Binding
 	end
 	const className = name :: Syntax.Binding
+	local superExpr: Syntax.AstExpr? = nil
+	if token_type == 281 and token_string == "extends" then
+		nextLexeme()
+		superExpr = parseClassRefExprImpl()
+	end
 
-	const savedLocals = #localStack
-	const nameLocal = pushLocal({
-		name = className.name,
+	const nameLocal = {
+		name = className.name.value,
 		location = className.location,
+		shadow = nil,
+		functionDepth = #functionStack - 1,
+		loopDepth = functionStack[#functionStack].loopDepth,
 		annotation = nil,
-		colonPosition = nil,
 		isConst = true,
-	} :: Syntax.Binding)
+		isExported = false,
+	} :: Syntax.AstLocal
 
 	const members = {} :: { Syntax.AstClassMember }
 	const memberNames: { [string]: boolean } = {}
@@ -4136,11 +4205,11 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 				propType = parseTypeImpl()
 			end
 
-			if string.sub(propName.name.value, 1, 2) == "__" then
+			if propName.name.value == "new" then
+				report(propName.location, "Class properties cannot be named 'new'. Define a method named '__init' to define a constructor.")
+			elseif string.sub(propName.name.value, 1, 2) == "__" then
 				report(propName.location, "Class properties cannot start with '__'")
-			end
-
-			if memberNames[propName.name.value] then
+			elseif memberNames[propName.name.value] then
 				report(propName.location, "Duplicate class member '%s'", propName.name.value)
 			else
 				memberNames[propName.name.value] = true
@@ -4192,7 +4261,9 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 				report(selfAnnotation.location, "The 'self' parameter cannot have a type annotation")
 			end
 
-			if string.sub(methodName, 1, 2) == "__" then
+			if methodName == "new" then
+				report(methodNameLocation, "Class methods cannot be named 'new'.  Name it '__init' to define a constructor.")
+			elseif string.sub(methodName, 1, 2) == "__" then
 				if DisallowedClassMetamethods[methodName] then
 					report(methodNameLocation, "Classes cannot define '%s' as a metamethod", methodName)
 				elseif not AllowedClassMetamethods[methodName] then
@@ -4201,6 +4272,14 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 						"Cannot use '%s' as a method name: names starting with '__' are reserved",
 						methodName
 					)
+				end
+			end
+
+			if methodName == "__init" then
+				if #body.args < 1 then
+					report(methodNameLocation, "__init must have at least one parameter")
+				elseif body.args[1].name ~= "self" then
+					report(body.args[1].location, "__init's first parameter must be named self")
 				end
 			end
 
@@ -4239,8 +4318,10 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 			end_ = vector.create(endLine, endColumn),
 		},
 		name = nameLocal,
+		super = superExpr,
 		members = members,
 		exported = exported,
+		open = open,
 	} :: Syntax.AstStatClass
 
 	if recursionCounter > 1 then
@@ -4248,7 +4329,6 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 	end
 
 	if classesWithinModule[nameLocal.name] then
-		restoreLocals(savedLocals)
 		return reportStatError(
 			nameLocal.location,
 			{},
@@ -4261,7 +4341,7 @@ const function parseClassStatImpl(start: Syntax.Location, exported: boolean): Sy
 	if classesWithinModule == EmptyArray then
 		classesWithinModule = {}
 	end
-	classesWithinModule[nameLocal.name] = true
+	classesWithinModule[nameLocal.name] = node
 	return node
 end
 
@@ -4319,9 +4399,16 @@ const function parseExportValueImpl(
 		end
 
 		return exportLocalStat(parseLocalImpl(start, constKeywordLocation.begin, nil, nil, true), constKeywordLocation)
-	elseif DebugLuauUserDefinedClasses and token_type == 281 and token_string == "class" then
+	elseif Flags.DebugLuauUserDefinedClasses and token_type == 281 and (token_string == "class" or token_string == "open") then
+		const open = token_string == "open"
 		nextLexeme()
-		const stat = parseClassStatImpl(start, true)
+		if open then
+			if token_type ~= 281 or token_string ~= "class" then
+				return reportStatError(start, {}, {}, "Incomplete statement: expected a class definition after 'open'")
+			end
+			nextLexeme()
+		end
+		const stat = parseClassStatImpl(start, true, open)
 
 		if stat.kind == "StatClass" then
 			if not checkDuplicateExport(stat.name.name, stat.name.location) then
@@ -5061,13 +5148,13 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 	elseif
 		token_type == 281
 		and (
-			if LuauDisallowExternClassInTypeDefinitions
+			if Flags.LuauDisallowExternClassInTypeDefinitions
 				then token_string == "extern"
 				else (
 					token_string == "extern"
 					or (
 						token_string == "class"
-						and (if LuauAllowGlobalDeclarationToBeCalledClass then next_type ~= 58 else true)
+						and (if Flags.LuauAllowGlobalDeclarationToBeCalledClass then next_type ~= 58 else true)
 					)
 				)
 		)
@@ -5075,7 +5162,7 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 		local foundExtern = false
 
 		if token_string == "extern" then
-			if not LuauDisallowExternClassInTypeDefinitions then
+			if not Flags.LuauDisallowExternClassInTypeDefinitions then
 				foundExtern = true
 			end
 
@@ -5105,7 +5192,7 @@ const function parseDeclarationImpl(start: Syntax.Location, attributes: Syntax.A
 			superName = superName or "%error-id%"
 		end
 
-		if LuauDisallowExternClassInTypeDefinitions or foundExtern then
+		if Flags.LuauDisallowExternClassInTypeDefinitions or foundExtern then
 			if token_type == 281 and token_string == "with" then
 				nextLexeme()
 			else
@@ -5293,7 +5380,7 @@ const function parseAttributeStatImpl(): Syntax.AstStat
 			cstAttrLists,
 			true
 		)
-	elseif LuauExportValueSyntax and type_ == 281 and token_string == "export" then
+	elseif Flags.LuauExportValueSyntax and type_ == 281 and token_string == "export" then
 		const keywordLocation = snapshot()
 		nextLexeme()
 		return parseExportValueImpl(
@@ -5322,7 +5409,7 @@ const function parseReturnImpl(): Syntax.AstStatReturn
 	const startEndLine, startEndColumn = token_end_line, token_end_col
 	nextLexeme()
 
-	if LuauExportValueSyntax and #functionStack == 1 then
+	if Flags.LuauExportValueSyntax and #functionStack == 1 then
 		for _, exportLocation in declaredExportBindings do
 			report(
 				exportLocation,
@@ -5510,7 +5597,7 @@ end
 -- varlist `=' explist
 const function parseAssignmentImpl(initial: Syntax.AstExpr): Syntax.AstStatAssign
 	if not isExprLValue(initial) then
-		initial = if LuauExportValueSyntax
+		initial = if Flags.LuauExportValueSyntax
 			then reportLValueError(initial)
 			else reportExprError(initial.location, { initial }, "Assigned expression must be a variable or a field")
 	end
@@ -5526,7 +5613,7 @@ const function parseAssignmentImpl(initial: Syntax.AstExpr): Syntax.AstStatAssig
 
 		local expr = parsePrimaryExprImpl(true)
 		if not isExprLValue(expr) then
-			expr = if LuauExportValueSyntax
+			expr = if Flags.LuauExportValueSyntax
 				then reportLValueError(expr)
 				else reportExprError(expr.location, { expr }, "Assigned expression must be a variable or a field")
 		end
@@ -5566,7 +5653,7 @@ end
 -- var [`+=' | `-=' | `*=' | `/=' | `%=' | `^=' | `..='] exp
 const function parseCompoundAssignmentImpl(initial: Syntax.AstExpr, op: number): Syntax.AstStatCompoundAssign
 	if not isExprLValue(initial) then
-		initial = if LuauExportValueSyntax
+		initial = if Flags.LuauExportValueSyntax
 			then reportLValueError(initial)
 			else reportExprError(initial.location, { initial }, "Assigned expression must be a variable or a field")
 	end
@@ -6282,7 +6369,7 @@ const function parseNumberImpl(): Syntax.AstExprConstantNumber | Syntax.AstExprC
 	-- Remove internal '_'
 	const cleanData = string.gsub(data, "_", "")
 
-	if LuauIntegerType2 and string.sub(cleanData, -1) == "i" then
+	if Flags.LuauIntegerType2 and string.sub(cleanData, -1) == "i" then
 		const integerData = string.sub(cleanData, 1, -2)
 		local low = 0
 		local high = 0
@@ -6385,8 +6472,13 @@ const function parseNumberImpl(): Syntax.AstExprConstantNumber | Syntax.AstExprC
 		const content = string.sub(cleanData, 3)
 		const significant = string.match(content, "^0*(.+)") or "0"
 
+		-- Some runtimes accept a second binary prefix when parsing base 2.
+		-- The lexer already consumed the first one, so reject it explicitly.
+		if Flags.LuauNoDuplicateBinaryPrefix and string.find(content, "^0[bB]") then
+			parseResult = ParseResultMalformed
+			value = 0
 		-- 64 bits max for uint64
-		if #significant > 64 then
+		elseif #significant > 64 then
 			parseResult = ParseResultBinOverflow
 			value = 0
 		else
@@ -6861,19 +6953,28 @@ const function parseStat(): Syntax.AstStat
 		return parseTypeAliasImpl(expr.location, false, expr.location.begin.x, expr.location.begin.y)
 	end
 
-	if DebugLuauUserDefinedClasses and ident == "class" then
-		return parseClassStatImpl(expr.location, false)
+	if Flags.DebugLuauUserDefinedClasses and ident == "class" then
+		return parseClassStatImpl(expr.location, false, false)
+	elseif Flags.DebugLuauUserDefinedClasses and ident == "open" then
+		if token_type ~= 281 or token_string ~= "class" then
+			return reportStatError(expr.location, { expr }, {}, "Incomplete statement: expected a class definition after 'open'")
+		end
+		nextLexeme()
+		return parseClassStatImpl(expr.location, false, true)
 	end
 
 	if ident == "export" then
 		if
-			LuauExportValueSyntax
+			Flags.LuauExportValueSyntax
 			and (
 				token_type == 302
 				or token_type == 299
 				or (
 					token_type == 281
-					and (token_string == "const" or (DebugLuauUserDefinedClasses and token_string == "class"))
+					and (
+						token_string == "const"
+						or (Flags.DebugLuauUserDefinedClasses and (token_string == "class" or token_string == "open"))
+					)
 				)
 			)
 		then
@@ -6882,9 +6983,16 @@ const function parseStat(): Syntax.AstStat
 			const typeKeywordLine, typeKeywordColumn = token_start_line, token_start_col
 			nextLexeme()
 			return parseTypeAliasImpl(expr.location, true, typeKeywordLine, typeKeywordColumn)
-		elseif not LuauExportValueSyntax and DebugLuauUserDefinedClasses and token_type == 281 and token_string == "class" then
+		elseif not Flags.LuauExportValueSyntax and Flags.DebugLuauUserDefinedClasses and token_type == 281 and token_string == "class" then
 			nextLexeme()
-			return parseClassStatImpl(expr.location, true)
+			return parseClassStatImpl(expr.location, true, false)
+		elseif not Flags.LuauExportValueSyntax and Flags.DebugLuauUserDefinedClasses and token_type == 281 and token_string == "open" then
+			nextLexeme()
+			if token_type ~= 281 or token_string ~= "class" then
+				return reportStatError(expr.location, { expr }, {}, "Incomplete statement: expected a class definition after 'open'")
+			end
+			nextLexeme()
+			return parseClassStatImpl(expr.location, true, true)
 		end
 	end
 
@@ -6913,6 +7021,10 @@ const function parseStat(): Syntax.AstStat
 end
 
 -- ReturnType ::= Type | `(' TypeList `)'
+const function isTypeFollow(type_: number): boolean
+	return type_ == 124 or type_ == 63 or type_ == 38
+end
+
 const function parseReturnTypeImpl(): Syntax.AstTypePack
 	incrementRecursionCounter("type annotation")
 
@@ -6976,7 +7088,31 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 		if #result == 1 then
 			-- TODO(CLI-140667): stop parsing type suffix when varargAnnotation != nullptr - this should be a parse error
 			local inner: Syntax.AstType
-			if varargAnnotation == nil then
+			local parensBelongToInnerGroup = false
+			if Flags.LuauSingleTypeOptionalPackReturnsAttributeParens then
+				if varargAnnotation == nil and isTypeFollow(token_type) then
+					const typeGroup = {
+						kind = "TypeGroup",
+						location = {
+							begin = beginLocation.begin,
+							end_ = vector.create(endLine, endColumn),
+						},
+						type = result[1],
+					} :: Syntax.AstTypeGroup
+
+					if storeCstData then
+						typeGroup.cstNode = {
+							kind = "CstTypeGroup",
+							closePosition = closeParenPos :: Syntax.Position,
+						}
+					end
+
+					inner = typeGroup
+					parensBelongToInnerGroup = true
+				else
+					inner = result[1]
+				end
+			elseif varargAnnotation == nil then
 				const typeGroup = {
 					kind = "TypeGroup",
 					location = {
@@ -7017,9 +7153,18 @@ const function parseReturnTypeImpl(): Syntax.AstTypePack
 			} :: Syntax.AstTypePackExplicit
 
 			if storeCstData then
-				node.cstNode = {
-					kind = "CstTypePackExplicit",
-				}
+				if Flags.LuauSingleTypeOptionalPackReturnsAttributeParens and not parensBelongToInnerGroup then
+					node.cstNode = {
+						kind = "CstTypePackExplicit",
+						openParenthesesPosition = beginLocation.begin,
+						closeParenthesesPosition = closeParenPos :: Syntax.Position,
+						commaPositions = commaPositions or {},
+					}
+				else
+					node.cstNode = {
+						kind = "CstTypePackExplicit",
+					}
+				end
 			end
 			return node
 		end
@@ -7214,6 +7359,7 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 		local prefix: string? = nil
 		local prefixLoc: Syntax.Location? = nil
 		local prefixPointPos: Syntax.Position? = nil
+		local prefixLocal: Syntax.AstLocal? = nil
 
 		if token_type == 46 then
 			if storeCstData then
@@ -7222,6 +7368,9 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 			nextLexeme()
 			prefix = name
 			prefixLoc = nameLocation
+			if Flags.LuauTrackPrefixLocal then
+				prefixLocal = localMap[name]
+			end
 			name, nameStartLine, nameStartColumn, nameEndLine, nameEndColumn =
 				parseIndexNameScalars("field name", nameLocation.end_)
 			name = name or "%error-id%"
@@ -7293,6 +7442,7 @@ const function parseSimpleTypeImpl(allowPack: boolean, inDeclarationContext: boo
 			prefix = prefix,
 			name = name,
 			prefixLocation = prefixLoc,
+			prefixLocal = prefixLocal,
 			nameLocation = nameLocation,
 			hasParameterList = hasParams,
 			parameters = params,
@@ -7479,7 +7629,7 @@ const function parseChunk(sourceText: string, parseOptions: Syntax.Options): Syn
 	parseErrors = EmptyArray :: { Syntax.ParseError }
 	declaredExportBindings = EmptyArray :: { [string]: Syntax.Location }
 	hasModuleReturn = false
-	classesWithinModule = EmptyArray :: { [string]: boolean }
+	classesWithinModule = EmptyArray :: { [string]: Syntax.AstStatClass }
 
 	hotcommentHeader = true
 
